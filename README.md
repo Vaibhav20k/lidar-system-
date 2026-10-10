@@ -43,7 +43,7 @@ npx cap open ios
 3. In Roomform, select **Scan a room**, enter a name, start and grant camera access. Slowly cover the floor, each wall, openings and furniture. Tap **Finish scan**.
 4. Review dimensions in the editor. Save and export JSON/GLB; **Original Apple capture** shares the original USDZ. Edits to the shared model do not rewrite that original USDZ.
 
-`RoomScanner.swift` is already registered in the Xcode project and main storyboard. Camera usage text is included. Unsupported iOS devices retain manual entry and review. The simulator cannot perform LiDAR capture. A Windows browser cannot install a signed iOS app. The optional CI workflow can compile unsigned iOS code, but signing/device testing is still separate.
+`RoomScanner.swift` is in the Xcode project and its plugin is registered by `RoomformViewController`, which `SceneDelegate` installs as the root view controller. While RoomPlan scans, the plugin also saves a raw bundle beside the USDZ (`<id>-raw/`: JPEG keyframes, LiDAR depth and confidence maps, camera poses and intrinsics; format described in its `manifest.json`) for later re-processing; pass `recordRaw: false` to `scan` to skip it. Each bundle can reach roughly 100 MB and nothing deletes old ones yet. Camera usage text is included. Unsupported iOS devices retain manual entry and review. The simulator cannot perform LiDAR capture. A Windows browser cannot install a signed iOS app. The optional CI workflow can compile unsigned iOS code, but signing/device testing is still separate.
 
 ## Android: build and scan
 
