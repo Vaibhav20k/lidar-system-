@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Roomform</string>
+    <string name="title_activity_main">Roomform</string>
+    <string name="package_name">com.roomform.studio</string>
+    <string name="custom_url_scheme">com.roomform.studio</string>
+</resources>

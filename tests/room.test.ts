@@ -1,0 +1,87 @@
+import { describe, expect, it } from 'vitest';
+import { floorArea, newRoom, parseRoom, calibrateRoom, updateCorner, polygonErrors, wallsFromFloor, wallLength } from '../src/domain/room';
+import { sampleRoom } from '../src/domain/sample';
+import { chainWalls, normalizeCapture, inferConvexFloor } from '../src/domain/native';
+import { buildRoomGroup, disposeGroup } from '../src/scene/buildRoom';
+import * as THREE from 'three';
+
+describe('room geometry', () => {
+  it('preserves a concave floor without filling in the missing region', () => {
+    const floor = [{x:0,z:0},{x:5,z:0},{x:5,z:2},{x:2,z:2},{x:2,z:4},{x:0,z:4}];
+    const room = parseRoom({...newRoom('L room'), floor, walls:wallsFromFloor(floor,2.7,'measured')});
+    expect(floorArea(room)).toBe(14);
+    const shuffled = [room.walls[3],room.walls[1],room.walls[5],room.walls[2],room.walls[0],room.walls[4]].map((w,i)=>i%2?{...w,start:w.end,end:w.start}:w);
+    expect(Math.abs(chainWalls(shuffled).reduce((a,p,i,ps)=>a+p.x*ps[(i+1)%ps.length].z-ps[(i+1)%ps.length].x*p.z,0)/2)).toBe(14);
+  });
+  it('rejects crossing, repeated and tiny floor outlines', () => {
+    expect(polygonErrors([{x:0,z:0},{x:4,z:3},{x:0,z:3},{x:4,z:0}])).not.toHaveLength(0);
+    expect(polygonErrors([{x:0,z:0},{x:4,z:0},{x:4,z:0},{x:0,z:3}])).not.toHaveLength(0);
+    expect(()=>newRoom('Too small',.1,.1)).toThrow();
+    expect(()=>newRoom('Negative',-5,4)).toThrow();
+  });
+  it('rejects openings outside the wall, missing references and overlapping openings', () => {
+    const room=sampleRoom();
+    expect(()=>parseRoom({...room,openings:[{...room.openings[0],offset:5}]})).toThrow(/beyond/);
+    expect(()=>parseRoom({...room,openings:[{...room.openings[0],wallId:'missing'}]})).toThrow(/missing wall/);
+    expect(()=>parseRoom({...room,openings:[room.openings[0],{...room.openings[0],id:'duplicate-position'}]})).toThrow(/overlap/);
+  });
+  it('scales all geometry together and preserves original evidence source', () => {
+    const room=sampleRoom(), result=calibrateRoom(room,wallLength(room.walls[0])*1.1,room.walls[0].id);
+    expect(floorArea(result)).toBeCloseTo(floorArea(room)*1.21);
+    expect(result.openings[0].sill).toBeCloseTo(room.openings[0].sill*1.1);
+    expect(result.objects[0].position.y).toBeCloseTo(room.objects[0].position.y*1.1);
+    expect(result.objects[0].size.x).toBeCloseTo(room.objects[0].size.x*1.1);
+    expect(result.walls[0].evidence).toBe('edited'); expect(result.source).toBe('sample');
+  });
+  it('moves the two connected wall endpoints when editing a corner', () => {
+    const room=newRoom('Room'), moved=updateCorner(room,1,{x:6,z:0});
+    expect(moved.walls[0].end).toEqual({x:6,z:0}); expect(moved.walls[1].start).toEqual({x:6,z:0});
+    expect(floorArea(moved)).toBe(22);
+  });
+  it('leaves actual holes in exported wall meshes', () => {
+    const room=newRoom('Door test');
+    room.openings=[{id:'door',wallId:'wall-1',kind:'opening',offset:1,width:1,height:2,sill:0,evidence:'edited'}];
+    const group=buildRoomGroup(room); group.updateMatrixWorld(true);
+    const ray=new THREE.Raycaster(new THREE.Vector3(1.5,1,-1),new THREE.Vector3(0,0,1));
+    expect(ray.intersectObject(group,true).filter(h=>h.object.userData.elementId==='wall-1')).toHaveLength(0);
+    ray.set(new THREE.Vector3(.5,1,-1),new THREE.Vector3(0,0,1));
+    expect(ray.intersectObject(group,true).filter(h=>h.object.userData.elementId==='wall-1').length).toBeGreaterThan(0);
+    disposeGroup(group);
+  });
+});
+
+function matrix(x:number,y:number,z:number,angle=0) {
+  return [Math.cos(angle),0,-Math.sin(angle),0, 0,1,0,0, Math.sin(angle),0,Math.cos(angle),0, x,y,z,1];
+}
+function appleCapture() {
+  const wall=(x:number,z:number,width:number,angle=0)=>({id:crypto.randomUUID(),transform:matrix(x,1.4,z,angle),width,height:2.8,depth:0,confidence:'high'});
+  return {kind:'roomplan',walls:[wall(2.5,0,5),wall(5,2,4,-Math.PI/2),wall(2.5,4,5,Math.PI),wall(0,2,4,Math.PI/2)],openings:[],objects:[]} as Record<string,unknown>;
+}
+describe('native measurement normalization', () => {
+  it('converts column-major Apple matrices, openings and object yaw to meters', () => {
+    const raw=appleCapture();
+    raw.openings=[{id:crypto.randomUUID(),kind:'window',transform:matrix(2,1.6,0),width:1.4,height:1,depth:0}];
+    raw.objects=[{id:crypto.randomUUID(),category:'sofa',transform:matrix(2,.5,2,Math.PI/2),width:2,height:1,depth:.8}];
+    const room=normalizeCapture(raw,'Apple room');
+    expect(room.source).toBe('roomplan'); expect(floorArea(room)).toBeCloseTo(20);
+    expect(room.openings[0].offset).toBeCloseTo(1.3); expect(room.openings[0].sill).toBeCloseTo(1.1);
+    expect(room.objects[0].rotation).toBeCloseTo(Math.PI/2);
+  });
+  it('keeps incomplete Apple walls but never invents a closed floor', () => {
+    const raw=appleCapture(); (raw.walls as unknown[]).pop(); const room=normalizeCapture(raw,'Incomplete');
+    expect(room.floor).toEqual([]); expect(room.floorEvidence).toBe('missing');
+  });
+  it('creates a guided Android room including concave corners with a manual height warning', () => {
+    const room=normalizeCapture({kind:'arcore',corners:[{x:0,z:0},{x:5,z:0},{x:5,z:2},{x:2,z:2},{x:2,z:4},{x:0,z:4}],points:[],floorY:-1.5,height:2.6,depth:false},'Android');
+    expect(floorArea(room)).toBe(14); expect(room.source).toBe('arcore-guided'); expect(room.walls[0].height).toBe(2.6);
+    expect(room.warnings.join()).toMatch(/height.*manually/);
+  });
+  it('estimates a convex perimeter from synthetic depth and refuses insufficient coverage', () => {
+    const points=[];
+    for(let i=0;i<120;i++){const t=i/119;points.push({x:5*t,y:.4+(i%15)*.1,z:0},{x:5,y:.4+(i%15)*.1,z:4*t},{x:5*t,y:.4+(i%15)*.1,z:4},{x:0,y:.4+(i%15)*.1,z:4*t});}
+    const floor=inferConvexFloor(points,0);
+    expect(floor.length).toBe(4); expect(floorArea({...newRoom('Cloud'),floor})).toBeCloseTo(20,0);
+    expect(inferConvexFloor(points.filter(p=>p.z===0),0)).toEqual([]);
+    expect(()=>normalizeCapture({kind:'arcore',corners:[],points:[],floorY:0,height:2.7,depth:true},'Empty')).toThrow(/closed floor/);
+  });
+});
