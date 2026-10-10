@@ -4,7 +4,7 @@ import { floorArea, newRoom, parseRoom, perimeter, type Room } from './domain/ro
 import { sampleRoom } from './domain/sample';
 import { normalizeCapture } from './domain/native';
 import { listRooms, saveRoom, deleteRoom, syncRoom, pullRooms } from './services/storage';
-import { captureCapabilities, scanRoom, RoomScanner } from './services/capture';
+import { captureCapabilities, scanRooms, RoomScanner } from './services/capture';
 import FloorPlan from './components/FloorPlan';
 import Inspector from './components/Inspector';
 import Dialog from './components/Dialog';
@@ -45,8 +45,10 @@ export default function App() {
     setBusy(true);
     try {
       const name = String(data.get('name')).trim() || 'Untitled room', height = Number(data.get('height'));
-      const next = scan ? await scanRoom(name, height) : newRoom(name, Number(data.get('width')), Number(data.get('depth')), height);
-      await saveRoom(next); setRooms(await listRooms()); activate(next); setModal(null); setNotice({ text: scan ? 'Capture saved. Review the dimensions before using them.' : 'New room created.' });
+      const made = scan ? await scanRooms(name, height) : { rooms: [newRoom(name, Number(data.get('width')), Number(data.get('depth')), height)], skipped: 0 };
+      for (const room of made.rooms) await saveRoom(room);
+      const captured = `${made.rooms.length > 1 ? `${made.rooms.length} rooms captured` : 'Capture saved'}. Review the dimensions before using them.${made.skipped ? ` ${made.skipped} room${made.skipped > 1 ? 's' : ''} could not be read and ${made.skipped > 1 ? 'were' : 'was'} skipped.` : ''}`;
+      setRooms(await listRooms()); activate(made.rooms[0]); setModal(null); setNotice({ text: scan ? captured : 'New room created.' });
     } catch (e) { const message = e instanceof Error ? e.message : 'Capture failed.'; if (!/cancel/i.test(message)) error(message); }
     finally { setBusy(false); }
   };

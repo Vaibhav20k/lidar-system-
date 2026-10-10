@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { floorArea, newRoom, parseRoom, calibrateRoom, updateCorner, polygonErrors, wallsFromFloor, wallLength } from '../src/domain/room';
 import { sampleRoom } from '../src/domain/sample';
 import { chainWalls, normalizeCapture, inferConvexFloor } from '../src/domain/native';
+import { normalizeCaptures } from '../src/services/capture';
 import { buildRoomGroup, disposeGroup } from '../src/scene/buildRoom';
 import * as THREE from 'three';
 
@@ -66,6 +67,13 @@ describe('native measurement normalization', () => {
     expect(room.source).toBe('roomplan'); expect(floorArea(room)).toBeCloseTo(20);
     expect(room.openings[0].offset).toBeCloseTo(1.3); expect(room.openings[0].sill).toBeCloseTo(1.1);
     expect(room.objects[0].rotation).toBeCloseTo(Math.PI/2);
+  });
+  it('turns a multi-room Apple scan into one room each and skips an unreadable room', () => {
+    const extra={...appleCapture(),roomIndex:1,sharedSpace:true,rawPath:'/device/raw',floors:[]};
+    const result=normalizeCaptures([appleCapture(),{kind:'roomplan',walls:[]},extra],'Flat');
+    expect(result.rooms.map(r=>r.name)).toEqual(['Flat','Flat 3']); expect(result.skipped).toBe(1);
+    expect(new Set(result.rooms.map(r=>r.id)).size).toBe(2);
+    expect(()=>normalizeCaptures([{kind:'roomplan',walls:[]}],'Bad')).toThrow();
   });
   it('keeps incomplete Apple walls but never invents a closed floor', () => {
     const raw=appleCapture(); (raw.walls as unknown[]).pop(); const room=normalizeCapture(raw,'Incomplete');

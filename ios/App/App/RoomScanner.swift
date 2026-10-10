@@ -55,11 +55,12 @@ public class RoomScannerPlugin: CAPPlugin, CAPBridgedPlugin {
                     scanner.completion = { result in
                         self.scanning = false
                         switch result {
-                        case .success(let capture): call.resolve(["capture": capture])
+                        case .success(let captures): call.resolve(["captures": captures])
                         case .failure(let error): call.reject(error.localizedDescription)
                         }
                     }
                     scanner.modalPresentationStyle = .fullScreen
+                    DispatchQueue.global(qos: .utility).async { Self.pruneRawBundles() }
                     presenter.present(scanner, animated: true)
                 }
             }
@@ -86,6 +87,14 @@ public class RoomScannerPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    /// Raw bundles are large and only needed for re-processing, so only the newest ones are kept.
+    static func pruneRawBundles(keeping limit: Int = 12) {
+        guard let items = try? FileManager.default.contentsOfDirectory(at: scanDirectory, includingPropertiesForKeys: [.creationDateKey]) else { return }
+        let created = { (url: URL) -> Date in (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast }
+        let bundles = items.filter { $0.lastPathComponent.hasSuffix("-raw") }.sorted { created($0) > created($1) }
+        for old in bundles.dropFirst(limit) { try? FileManager.default.removeItem(at: old) }
+    }
+
     static var scanDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("RoomformScans", isDirectory: true)
     }
@@ -93,15 +102,20 @@ public class RoomScannerPlugin: CAPPlugin, CAPBridgedPlugin {
 
 @available(iOS 16.0, *)
 private final class RoomScanController: UIViewController, RoomCaptureViewDelegate {
-    var completion: ((Result<[String: Any], Error>) -> Void)?
-    private let captureView = RoomCaptureView(frame: .zero)
-    private let doneButton = UIButton(type: .system)
-    private var finished = false
-    private var processing = false
-    private var timeout: Timer?
+    static let maxRooms = 12
+    var completion: ((Result<[[String: Any]], Error>) -> Void)?
     var recordRaw = true
-    private let scanId = UUID().uuidString
+    private enum Phase { case scanning, processing, reviewing }
+    private let captureView = RoomCaptureView(frame: .zero)
+    private let leftButton = UIButton(type: .system), rightButton = UIButton(type: .system)
+    private var phase = Phase.scanning
+    private var finished = false
+    private var timeout: Timer?
+    private var roomId = UUID().uuidString
     private var recorder: RawCaptureRecorder?
+    private var captures: [[String: Any]] = []
+    // From iOS 17 the ARSession keeps running between rooms, so every room shares one coordinate space.
+    private var sharedSpace: Bool { if #available(iOS 17.0, *) { return true } else { return false } }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -109,12 +123,9 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
         captureView.delegate = self
         captureView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(captureView)
-        let cancel = UIButton(type: .system)
-        cancel.setTitle("Cancel", for: .normal)
-        cancel.addTarget(self, action: #selector(cancelScan), for: .touchUpInside)
-        doneButton.setTitle("Finish scan", for: .normal)
-        doneButton.addTarget(self, action: #selector(finishScan), for: .touchUpInside)
-        let bar = UIStackView(arrangedSubviews: [cancel, doneButton])
+        leftButton.addTarget(self, action: #selector(leftTapped), for: .touchUpInside)
+        rightButton.addTarget(self, action: #selector(rightTapped), for: .touchUpInside)
+        let bar = UIStackView(arrangedSubviews: [leftButton, rightButton])
         bar.axis = .horizontal; bar.distribution = .fillEqually; bar.spacing = 20
         bar.backgroundColor = .secondarySystemBackground
         bar.layer.cornerRadius = 16
@@ -128,51 +139,94 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
             bar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12), bar.heightAnchor.constraint(equalToConstant: 54)
         ])
         NotificationCenter.default.addObserver(self, selector: #selector(interrupted), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        startRoom()
+    }
+
+    private func startRoom() {
+        roomId = UUID().uuidString
+        phase = .scanning; updateBar()
         captureView.captureSession.run(configuration: RoomCaptureSession.Configuration())
         if recordRaw {
             // Raw recording is best-effort: a failure here must never block the RoomPlan scan itself.
-            let folder = RoomScannerPlugin.scanDirectory.appendingPathComponent(scanId + "-raw", isDirectory: true)
+            let folder = RoomScannerPlugin.scanDirectory.appendingPathComponent(roomId + "-raw", isDirectory: true)
             recorder = try? RawCaptureRecorder(session: captureView.captureSession.arSession, folder: folder)
             recorder?.start()
         }
     }
 
-    @objc private func finishScan() {
-        guard !processing && !finished else { return }
-        processing = true; doneButton.isEnabled = false; doneButton.setTitle("Building room…", for: .normal)
-        recorder?.stop()
-        captureView.captureSession.stop()
-        timeout = Timer.scheduledTimer(withTimeInterval: 90, repeats: false) { [weak self] _ in
-            self?.fail("Room processing timed out. Please scan again.")
+    private func updateBar() {
+        switch phase {
+        case .scanning:
+            leftButton.setTitle(captures.isEmpty ? "Cancel" : "Stop here", for: .normal); leftButton.isEnabled = true
+            rightButton.setTitle("Finish room", for: .normal); rightButton.isEnabled = true
+        case .processing:
+            leftButton.isEnabled = false
+            rightButton.setTitle("Building room…", for: .normal); rightButton.isEnabled = false
+        case .reviewing:
+            leftButton.setTitle("Next room", for: .normal); leftButton.isEnabled = captures.count < Self.maxRooms
+            rightButton.setTitle(captures.count == 1 ? "Done" : "Done (\(captures.count) rooms)", for: .normal); rightButton.isEnabled = true
         }
     }
-    @objc private func cancelScan() { fail("Scan cancelled") }
-    @objc private func interrupted() { fail("Scan interrupted when the app entered the background. Please scan again.") }
+
+    @objc private func leftTapped() {
+        guard !finished else { return }
+        if phase == .scanning { endScan("Scan cancelled") } else if phase == .reviewing { startRoom() }
+    }
+    @objc private func rightTapped() {
+        guard !finished else { return }
+        if phase == .scanning { finishRoom() } else if phase == .reviewing { finish(.success(captures)) }
+    }
+    private func finishRoom() {
+        phase = .processing; updateBar()
+        recorder?.stop()
+        if #available(iOS 17.0, *) { captureView.captureSession.stop(pauseARSession: false) } else { captureView.captureSession.stop() }
+        timeout = Timer.scheduledTimer(withTimeInterval: 90, repeats: false) { [weak self] _ in
+            self?.endScan("Room processing timed out. Please scan again.")
+        }
+    }
+    @objc private func interrupted() { endScan("Scan interrupted when the app entered the background. Please scan again.") }
+
+    /// Ends the whole session. Rooms already captured are kept; only the room in progress is lost.
+    private func endScan(_ message: String) {
+        if captures.isEmpty { fail(message) } else { finish(.success(captures)) }
+    }
     private func fail(_ message: String) {
         finish(.failure(NSError(domain: "Roomform", code: 1, userInfo: [NSLocalizedDescriptionKey: message])))
     }
-    private func finish(_ result: Result<[String: Any], Error>) {
+    private func finish(_ result: Result<[[String: Any]], Error>) {
         DispatchQueue.main.async {
             guard !self.finished else { return }
             self.finished = true; self.timeout?.invalidate()
-            if case .failure = result { self.recorder?.discard() }
-            self.recorder?.stop()
+            // A recorder still present here belongs to a room that never completed.
+            self.recorder?.discard(); self.recorder = nil
             self.captureView.captureSession.stop()
             self.dismiss(animated: true) { self.completion?(result); self.completion = nil }
         }
     }
+    /// The current room could not be built. With earlier rooms in hand, keep them and let the user continue.
+    private func roomFailed(_ message: String) {
+        timeout?.invalidate()
+        recorder?.discard(); recorder = nil
+        guard !captures.isEmpty else { fail(message); return }
+        phase = .reviewing; updateBar()
+        let alert = UIAlertController(title: "Room not saved", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
+
     func captureView(shouldPresent roomDataForProcessing: CapturedRoomData, error: Error?) -> Bool {
-        if let error = error { finish(.failure(error)); return false }
+        if let error = error { if !finished { roomFailed(error.localizedDescription) }; return false }
         return !finished
     }
     func captureView(didPresent processedResult: CapturedRoom, error: Error?) {
-        if let error = error { finish(.failure(error)); return }
-        guard !finished else { return }
-        guard processedResult.walls.count >= 3 else { fail("Too few walls detected. Scan every wall, including corners, then finish."); return }
+        guard !finished, phase == .processing else { return }
+        timeout?.invalidate()
+        if let error = error { roomFailed(error.localizedDescription); return }
+        guard processedResult.walls.count >= 3 else { roomFailed("Too few walls detected. Scan every wall, including corners, then finish."); return }
         do {
             let folder = RoomScannerPlugin.scanDirectory
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let id = scanId
+            let id = roomId
             let usdz = folder.appendingPathComponent(id).appendingPathExtension("usdz")
             try processedResult.export(to: usdz, exportOptions: .parametric)
             var openings = processedResult.doors.map { surface($0, kind: "door") }
@@ -184,7 +238,7 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
                     ["id": object.identifier.uuidString, "transform": matrix(object.transform), "width": object.dimensions.x,
                      "height": object.dimensions.y, "depth": object.dimensions.z, "confidence": String(describing: object.confidence),
                      "category": String(describing: object.category)]
-                }, "usdzPath": usdz.path
+                }, "usdzPath": usdz.path, "roomIndex": captures.count, "sharedSpace": sharedSpace
             ]
             if #available(iOS 17.0, *) {
                 capture["floors"] = processedResult.floors.map { floor -> [String: Any] in
@@ -194,11 +248,13 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
                 }
             }
             if let raw = recorder?.finish(scanId: id) { capture.merge(raw) { _, new in new } }
+            recorder = nil
             // Keep raw data alongside USDZ so a normalization failure does not destroy the measurement.
             let json = try JSONSerialization.data(withJSONObject: capture, options: [.prettyPrinted, .sortedKeys])
             try json.write(to: folder.appendingPathComponent(id).appendingPathExtension("json"), options: .atomic)
-            finish(.success(capture))
-        } catch { finish(.failure(error)) }
+            captures.append(capture)
+            phase = .reviewing; updateBar()
+        } catch { roomFailed(error.localizedDescription) }
     }
     private func surface(_ value: CapturedRoom.Surface, kind: String? = nil) -> [String: Any] {
         var result: [String: Any] = ["id": value.identifier.uuidString, "transform": matrix(value.transform),
