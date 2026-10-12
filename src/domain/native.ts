@@ -4,7 +4,8 @@ import { distance, newRoom, parseRoom, polygonErrors, wallsFromFloor, type Point
 const finite = z.number().finite().min(-1000).max(1000);
 const surface = z.object({ id: z.string().uuid(), transform: z.array(finite).length(16), width: finite.positive(), height: finite.positive(), depth: finite.nonnegative().default(0), confidence: z.string().optional() });
 export const captureSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('roomplan'), walls: z.array(surface).min(3).max(128), openings: z.array(surface.extend({ kind: z.enum(['door', 'window', 'opening']) })).max(128), objects: z.array(surface.extend({ category: z.string().max(50) })).max(256), usdzPath: z.string().optional() }),
+  z.object({ kind: z.literal('roomplan'), walls: z.array(surface).min(3).max(128), openings: z.array(surface.extend({ kind: z.enum(['door', 'window', 'opening']) })).max(128), objects: z.array(surface.extend({ category: z.string().max(50), attributes: z.record(z.string().max(40), z.string().max(40)).optional() })).max(256), usdzPath: z.string().optional(),
+    floors: z.array(z.object({ transform: z.array(finite).length(16), corners: z.array(z.array(finite).length(3)).max(128).optional() })).max(16).optional() }),
   z.object({ kind: z.literal('arcore'), corners: z.array(z.object({ x: finite, z: finite })).max(128), points: z.array(z.object({ x: finite, y: finite, z: finite })).max(20000), floorY: finite, height: z.number().min(0.5).max(12), depth: z.boolean() }),
 ]);
 export type NativeCapture = z.infer<typeof captureSchema>;
@@ -45,8 +46,16 @@ export function normalizeCapture(value: unknown, name: string): Room {
     const m = w.transform, half = w.width / 2;
     return { id: w.id, start: { x: m[12] - m[0] * half, z: m[14] - m[2] * half }, end: { x: m[12] + m[0] * half, z: m[14] + m[2] * half }, height: w.height, thickness: 0.12, baseY: m[13] - w.height / 2 - floorY, evidence: w.confidence === 'low' ? 'estimated' : 'measured' };
   });
-  const floor = chainWalls(walls);
-  const warnings = floor.length ? ['Floor outline inferred from wall endpoints. Wall thickness is a display default, not a measured value.'] : ['Wall endpoints do not form a closed floor. Review walls; floor area is unavailable.', 'Wall thickness is a display default, not a measured value.'];
+  let floor = chainWalls(walls), scannedFloor = false;
+  if (!floor.length) {
+    // Rooms with columns or wall jogs rarely chain cleanly; fall back to the floor polygon the scanner reports (iOS 17+).
+    const source = [...(capture.floors ?? [])].sort((a, b) => (b.corners?.length ?? 0) - (a.corners?.length ?? 0))[0];
+    const corners = (source?.corners ?? []).map(([x, y]) => ({ x: source.transform[0] * x + source.transform[4] * y + source.transform[12], z: source.transform[2] * x + source.transform[6] * y + source.transform[14] }))
+      .filter((p, i, all) => distance(p, all[(i + all.length - 1) % all.length]) >= 0.1);
+    if (corners.length >= 3 && !polygonErrors(corners).length) { floor = corners; scannedFloor = true; }
+  }
+  const warnings = scannedFloor ? ['Floor outline taken from the scanned floor surface; some wall ends do not meet. Wall thickness is a display default, not a measured value.']
+    : floor.length ? ['Floor outline inferred from wall endpoints. Wall thickness is a display default, not a measured value.'] : ['Wall endpoints do not form a closed floor. Review walls; floor area is unavailable.', 'Wall thickness is a display default, not a measured value.'];
   const openings: Room['openings'] = [];
   for (const o of capture.openings) {
     const center = { x: o.transform[12], z: o.transform[14] };
@@ -70,7 +79,7 @@ export function normalizeCapture(value: unknown, name: string): Room {
     openings.push(opening);
   }
   return parseRoom({ ...base, source: 'roomplan', walls, floor, floorEvidence: floor.length ? 'inferred' : 'missing', openings,
-    objects: capture.objects.map(o => ({ id: o.id, label: o.category, category: o.category, position: { x: o.transform[12], y: o.transform[13] - floorY, z: o.transform[14] }, size: { x: o.width, y: o.height, z: Math.max(0.02, o.depth) }, rotation: Math.atan2(-o.transform[2], o.transform[0]), evidence: o.confidence === 'low' ? 'estimated' : 'measured' })),
+    objects: capture.objects.map(o => ({ id: o.id, label: o.category, category: o.category, position: { x: o.transform[12], y: o.transform[13] - floorY, z: o.transform[14] }, size: { x: o.width, y: o.height, z: Math.max(0.02, o.depth) }, rotation: Math.atan2(-o.transform[2], o.transform[0]), evidence: o.confidence === 'low' ? 'estimated' : 'measured', ...(o.attributes ? { attributes: o.attributes } : {}) })),
     warnings: warnings.slice(0, 50), originalUsdzPath: capture.usdzPath,
   });
 }

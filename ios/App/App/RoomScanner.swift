@@ -235,9 +235,17 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
             var capture: [String: Any] = [
                 "kind": "roomplan", "walls": processedResult.walls.map { surface($0) }, "openings": openings,
                 "objects": processedResult.objects.map { object -> [String: Any] in
-                    ["id": object.identifier.uuidString, "transform": matrix(object.transform), "width": object.dimensions.x,
-                     "height": object.dimensions.y, "depth": object.dimensions.z, "confidence": String(describing: object.confidence),
-                     "category": String(describing: object.category)]
+                    var value: [String: Any] = [
+                        "id": object.identifier.uuidString, "transform": matrix(object.transform), "width": object.dimensions.x,
+                        "height": object.dimensions.y, "depth": object.dimensions.z, "confidence": String(describing: object.confidence),
+                        "category": String(describing: object.category)]
+                    if #available(iOS 17.0, *) {
+                        // e.g. ["ChairType": "swivel", "ChairLegType": "star"]; lets the viewer pick a matching shape.
+                        var attributes: [String: String] = [:]
+                        for attribute in object.attributes { attributes[String(describing: type(of: attribute))] = String(describing: attribute) }
+                        if !attributes.isEmpty { value["attributes"] = attributes }
+                    }
+                    return value
                 }, "usdzPath": usdz.path, "roomIndex": captures.count, "sharedSpace": sharedSpace
             ]
             if #available(iOS 17.0, *) {

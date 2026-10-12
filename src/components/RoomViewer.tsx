@@ -4,8 +4,8 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { bounds, type Room } from '../domain/room';
 import { buildRoomGroup, disposeGroup } from '../scene/buildRoom';
 
-type Props = { room: Room; furniture: boolean; cutaway: boolean; selected: string; onSelect: (id: string) => void; resetKey: number };
-export default function RoomViewer({ room, furniture, cutaway, selected, onSelect, resetKey }: Props) {
+type Props = { room: Room; furniture: boolean; cutaway: boolean; ceiling: boolean; selected: string; onSelect: (id: string) => void; resetKey: number };
+export default function RoomViewer({ room, furniture, cutaway, ceiling, selected, onSelect, resetKey }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const pose = useRef<{ roomId: string; resetKey: number; position: THREE.Vector3; target: THREE.Vector3 } | null>(null);
   const onSelectRef = useRef(onSelect); onSelectRef.current = onSelect;
@@ -29,7 +29,7 @@ export default function RoomViewer({ room, furniture, cutaway, selected, onSelec
     }
     scene.add(new THREE.HemisphereLight('#ffffff', '#a6ad99', 2.8));
     const sun = new THREE.DirectionalLight('#fff9e9', 3); sun.position.set(cx - 3, 9, cz + 2); sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048); sun.shadow.camera.left = -span; sun.shadow.camera.right = span; sun.shadow.camera.top = span; sun.shadow.camera.bottom = -span; sun.shadow.bias = -0.001; sun.target.position.set(cx, 0, cz); scene.add(sun, sun.target);
-    const group = buildRoomGroup(room, { furniture, selected }); scene.add(group);
+    const group = buildRoomGroup(room, { furniture, selected, ceiling, markers: true }); scene.add(group);
     const grid = new THREE.GridHelper(Math.ceil(span * 4), Math.ceil(span * 4) * 2, '#d7dcd2', '#e1e4db'); grid.position.set(cx, -0.04, cz); scene.add(grid);
     const raycaster = new THREE.Raycaster(), pointer = new THREE.Vector2(); let start = { x: 0, y: 0 };
     const down = (e: PointerEvent) => { start = { x: e.clientX, y: e.clientY }; };
@@ -58,6 +58,6 @@ export default function RoomViewer({ room, furniture, cutaway, selected, onSelec
       renderer.render(scene, camera);
     }; draw();
     return () => { pose.current = { roomId: room.id, resetKey, position: camera.position.clone(), target: controls.target.clone() }; cancelAnimationFrame(frame); observer.disconnect(); controls.dispose(); renderer.domElement.removeEventListener('pointerdown', down); renderer.domElement.removeEventListener('pointerup', up); disposeGroup(scene); renderer.dispose(); container.removeChild(renderer.domElement); };
-  }, [room, furniture, cutaway, selected, resetKey]);
+  }, [room, furniture, cutaway, ceiling, selected, resetKey]);
   return <div ref={host} className="three-view">{error ? <p className="viewer-error" role="alert">{error}</p> : null}</div>;
 }

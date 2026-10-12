@@ -15,11 +15,28 @@ export const openingSchema = z.object({
   offset: number.min(0), width: number.min(0.1).max(20),
   height: number.min(0.1).max(12), sill: number.min(0).max(10), evidence: evidenceSchema,
 });
+// Wall-mounted electrical plates found on scan photos. Placed like openings: offset along the wall from its start, sill above its base.
+export const fixtureSchema = z.object({
+  id, wallId: id, kind: z.enum(['switch_board', 'socket', 'switch', 'regulator', 'distribution_box', 'other_electrical']),
+  offset: number.min(0), width: number.min(0.02).max(1), height: number.min(0.02).max(1), sill: number.min(0).max(10),
+  evidence: evidenceSchema, confidence: number.min(0).max(1).optional(),
+  switches: z.number().int().min(0).max(40).optional(), sockets: z.number().int().min(0).max(40).optional(),
+  note: z.string().max(200).optional(),
+});
+// Ceiling measured from scan depth: the main height above the floor plus every region at another height
+// (beams, soffits and lofts below it; coffers and recesses above it).
+const outline = z.array(pointSchema).min(3).max(128);
+export const ceilingSchema = z.object({
+  height: number.min(1).max(12), coverage: number.min(0).max(1).optional(),
+  regions: z.array(z.object({ points: outline, holes: z.array(outline).max(32).optional(), height: number.min(0.5).max(12), evidence: evidenceSchema })).max(64),
+});
 export const objectSchema = z.object({
   id, label: z.string().min(1).max(80), category: z.string().min(1).max(50),
   position: z.object({ x: number.min(-500).max(500), y: number.min(-20).max(20), z: number.min(-500).max(500) }),
   size: z.object({ x: number.min(0.02).max(30), y: number.min(0.02).max(12), z: number.min(0.02).max(30) }),
   rotation: number, evidence: evidenceSchema,
+  // Scanner-reported traits such as { ChairType: 'swivel', ChairLegType: 'star' }; absent for manual furniture.
+  attributes: z.record(z.string().max(40), z.string().max(40)).optional(),
 });
 export const roomSchema = z.object({
   schemaVersion: z.literal(1), id, name: z.string().trim().min(1).max(100),
@@ -30,6 +47,7 @@ export const roomSchema = z.object({
   floorEvidence: z.enum(['inferred', 'manual', 'missing', 'sample']),
   walls: z.array(wallSchema).min(3).max(128),
   openings: z.array(openingSchema).max(128), objects: z.array(objectSchema).max(256),
+  fixtures: z.array(fixtureSchema).max(256).optional(), ceiling: ceilingSchema.optional(),
   notes: z.string().max(5000).default(''), warnings: z.array(z.string().max(500)).max(50).default([]),
   originalUsdzPath: z.string().max(2000).optional(),
 });
@@ -37,6 +55,7 @@ export type Room = z.infer<typeof roomSchema>;
 export type Wall = Room['walls'][number];
 export type Opening = Room['openings'][number];
 export type RoomObject = Room['objects'][number];
+export type Fixture = z.infer<typeof fixtureSchema>;
 export type Evidence = z.infer<typeof evidenceSchema>;
 
 export const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.z - b.z);
@@ -68,7 +87,7 @@ export function polygonErrors(points: Point[]): string[] {
 }
 export function parseRoom(value: unknown): Room {
   const room = roomSchema.parse(value);
-  const allIds = [...room.walls, ...room.openings, ...room.objects].map(v => v.id);
+  const allIds = [...room.walls, ...room.openings, ...room.objects, ...(room.fixtures ?? [])].map(v => v.id);
   if (new Set(allIds).size !== allIds.length) throw new Error('Room element IDs must be unique.');
   if (room.floor.length) {
     const errors = polygonErrors(room.floor);
@@ -83,6 +102,11 @@ export function parseRoom(value: unknown): Room {
     if (opening.sill + opening.height > wall.height + 0.005) throw new Error('An opening extends above its wall.');
     const others = room.openings.filter(v => v.wallId === wall.id && v.id !== opening.id);
     if (others.some(v => opening.offset < v.offset + v.width - 0.005 && opening.offset + opening.width > v.offset + 0.005 && opening.sill < v.sill + v.height - 0.005 && opening.sill + opening.height > v.sill + 0.005)) throw new Error('Openings on the same wall cannot overlap.');
+  }
+  for (const fixture of room.fixtures ?? []) {
+    const wall = room.walls.find(v => v.id === fixture.wallId);
+    if (!wall) throw new Error('An electrical fixture refers to a missing wall.');
+    if (fixture.offset + fixture.width > wallLength(wall) + 0.005 || fixture.sill + fixture.height > wall.height + 0.005) throw new Error('An electrical fixture extends beyond its wall.');
   }
   return room;
 }
@@ -110,6 +134,8 @@ export function calibrateRoom(room: Room, measuredLength: number, wallId: string
     floor: room.floor.map(p),
     walls: room.walls.map(w => ({ ...w, start: p(w.start), end: p(w.end), height: w.height * s, baseY: w.baseY * s, thickness: w.thickness * s, evidence: 'edited' })),
     openings: room.openings.map(o => ({ ...o, offset: o.offset * s, width: o.width * s, height: o.height * s, sill: o.sill * s, evidence: 'edited' })),
+    ...(room.ceiling ? { ceiling: { ...room.ceiling, height: room.ceiling.height * s, regions: room.ceiling.regions.map(d => ({ ...d, height: d.height * s, points: d.points.map(p), holes: d.holes?.map(h => h.map(p)), evidence: 'edited' as const })) } } : {}),
+    ...(room.fixtures ? { fixtures: room.fixtures.map(f => ({ ...f, offset: f.offset * s, sill: f.sill * s, width: Math.min(1, f.width * s), height: Math.min(1, f.height * s), evidence: 'edited' as const })) } : {}),
     objects: room.objects.map(o => ({ ...o, position: { x: o.position.x * s, y: o.position.y * s, z: o.position.z * s }, size: { x: o.size.x * s, y: o.size.y * s, z: o.size.z * s }, evidence: 'edited' })),
     warnings: [...new Set([...room.warnings, 'Global scale calibrated from one reference. Local distortion still needs review.'])],
   });
