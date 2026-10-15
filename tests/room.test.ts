@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { floorArea, newRoom, parseRoom, calibrateRoom, updateCorner, polygonErrors, wallsFromFloor, wallLength } from '../src/domain/room';
+import { floorArea, newRoom, parseRoom, calibrateRoom, updateCorner, polygonErrors, wallsFromFloor, wallLength, columnsOf, setRoomHeight } from '../src/domain/room';
 import { sampleRoom } from '../src/domain/sample';
 import { chainWalls, normalizeCapture, inferConvexFloor } from '../src/domain/native';
 import { normalizeCaptures } from '../src/services/capture';
@@ -58,6 +58,49 @@ function appleCapture() {
   const wall=(x:number,z:number,width:number,angle=0)=>({id:crypto.randomUUID(),transform:matrix(x,1.4,z,angle),width,height:2.8,depth:0,confidence:'high'});
   return {kind:'roomplan',walls:[wall(2.5,0,5),wall(5,2,4,-Math.PI/2),wall(2.5,4,5,Math.PI),wall(0,2,4,Math.PI/2)],openings:[],objects:[]} as Record<string,unknown>;
 }
+describe('columns', () => {
+  // A 5 x 4 m room with a 42 x 21 cm column in one corner, the way RoomPlan draws it: two short walls.
+  const corner = [{x:0,z:0},{x:5,z:0},{x:5,z:4},{x:0.42,z:4},{x:0.42,z:3.79},{x:0,z:3.79}];
+  it('finds a full-height corner column and sizes it from its faces, whatever order the walls are listed in', () => {
+    const room = parseRoom({...newRoom('Corner'), floor: corner, walls: wallsFromFloor(corner, 2.8, 'measured')});
+    const shuffled = {...room, walls: [room.walls[3], room.walls[0], room.walls[5], room.walls[2], room.walls[4], room.walls[1]]};
+    for (const r of [room, shuffled]) {
+      const [column, ...rest] = columnsOf(r);
+      expect(rest).toHaveLength(0);
+      expect(column.kind).toBe('corner');
+      expect([column.width, column.depth].sort()).toEqual([expect.closeTo(0.21), expect.closeTo(0.42)]); expect(column.height).toBeCloseTo(2.8);
+      expect(column.wallIds).toEqual([room.walls[3].id, room.walls[4].id]);
+    }
+  });
+  it('finds a column standing out of the middle of a wall', () => {
+    const floor = [{x:0,z:0},{x:2,z:0},{x:2,z:0.3},{x:2.5,z:0.3},{x:2.5,z:0},{x:5,z:0},{x:5,z:4},{x:0,z:4}];
+    const [column, ...rest] = columnsOf(parseRoom({...newRoom('Pilaster'), floor, walls: wallsFromFloor(floor, 2.8, 'measured')}));
+    expect(rest).toHaveLength(0);
+    expect(column.kind).toBe('wall'); expect(column.width).toBeCloseTo(0.5); expect(column.depth).toBeCloseTo(0.3);
+  });
+  it('leaves a step whose faces are not full height as walls, and never calls a room corner a column', () => {
+    const room = parseRoom({...newRoom('Step'), floor: corner, walls: wallsFromFloor(corner, 2.8, 'measured')});
+    expect(columnsOf({...room, walls: room.walls.map((w, i) => i === 4 ? {...w, height: 2.1} : w)})).toHaveLength(0);
+    const plain = [{x:0,z:0},{x:5,z:0},{x:5,z:4},{x:0,z:4}];
+    expect(columnsOf(parseRoom({...newRoom('Plain'), floor: plain, walls: wallsFromFloor(plain, 2.8, 'measured')}))).toHaveLength(0);
+  });
+});
+
+describe('room height from a tape', () => {
+  it('moves the floor up to the real one and keeps the tops of walls, doors and ceilings where they were', () => {
+    const floor = [{x:0,z:0},{x:4,z:0},{x:4,z:3},{x:0,z:3}];
+    const base = parseRoom({...newRoom('Shiny'), floor, walls: wallsFromFloor(floor, 3.4, 'measured')});
+    const room = parseRoom({...base, ceiling: {height: 3.41, coverage: 0.9, regions: [{points: floor, height: 2.82, evidence: 'estimated'}]},
+      openings: [{id: crypto.randomUUID(), wallId: base.walls[0].id, kind: 'door', offset: 1, width: 0.9, height: 2.3, sill: 0, evidence: 'measured'}],
+      fixtures: [{id: crypto.randomUUID(), wallId: base.walls[0].id, kind: 'switch_board', offset: 2, width: 0.23, height: 0.08, sill: 0.8, evidence: 'estimated'}]});
+    const fixed = setRoomHeight(room, 3.218);
+    expect(fixed.ceiling!.height).toBeCloseTo(3.218); expect(fixed.ceiling!.regions[0].height).toBeCloseTo(2.627);
+    expect(fixed.walls[0].height).toBeCloseTo(3.208); expect(fixed.fixtures![0].sill).toBeCloseTo(0.608);
+    expect(fixed.openings[0].sill).toBe(0); expect(fixed.openings[0].height).toBeCloseTo(2.108);
+    expect(() => setRoomHeight(room, 2.6)).toThrow();
+  });
+});
+
 describe('native measurement normalization', () => {
   it('converts column-major Apple matrices, openings and object yaw to meters', () => {
     const raw=appleCapture();

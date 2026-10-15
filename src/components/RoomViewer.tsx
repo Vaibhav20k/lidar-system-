@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { bounds, describeElement, signedArea, wallLength, type Point, type Room } from '../domain/room';
+import { bounds, columnName, columnsOf, describeElement, signedArea, wallLength, type Point, type Room } from '../domain/room';
 import { buildRoomGroup, disposeGroup } from '../scene/buildRoom';
 
 export type ViewMode = 'orbit' | 'top' | 'inside';
@@ -194,9 +194,16 @@ export default function RoomViewer({ room, furniture, cutaway, ceiling, selected
       });
     }
     const overlay = new THREE.Group(); scene.add(overlay); // tags and measurements, drawn over everything and never faded by the cutaway
-    if (labels) for (const wall of room.walls) {
-      const label = tag(`${wallLength(wall).toFixed(2)} m`, 0.17); cleanup.push(label.dispose);
-      label.sprite.position.set((wall.start.x + wall.end.x) / 2, wall.baseY + wall.height + 0.16, (wall.start.z + wall.end.z) / 2); overlay.add(label.sprite);
+    if (labels) {
+      const columns = columnsOf(room);
+      for (const wall of room.walls) {
+        // A column gets one tag naming it, at its corner, instead of a length on each of its faces.
+        const column = columns.find(c => c.wallIds.includes(wall.id));
+        if (column && column.wallIds[0] !== wall.id) continue;
+        const label = tag(column ? columnName(column) : `${wallLength(wall).toFixed(2)} m`, 0.17); cleanup.push(label.dispose);
+        const at = column ? wall.end : { x: (wall.start.x + wall.end.x) / 2, z: (wall.start.z + wall.end.z) / 2 };
+        label.sprite.position.set(at.x, wall.baseY + wall.height + 0.16, at.z); overlay.add(label.sprite);
+      }
     }
 
     const raycaster = new THREE.Raycaster(), pointer = new THREE.Vector2();

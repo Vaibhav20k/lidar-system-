@@ -302,7 +302,11 @@ def ceiling_surfaces(capture, room, min_area=0.4):
         a, b = corners @ axis_x, corners @ axis_y
         center = axis_x * (a.min() + a.max()) / 2 + axis_y * (b.min() + b.max()) / 2
         center[1] = floor_y + height
-        return Wall.plane(name, center, axis_x, down, a.max() - a.min() + 0.1, b.max() - b.min() + 0.1), height
+        plane = Wall.plane(name, center, axis_x, down, a.max() - a.min() + 0.1, b.max() - b.min() + 0.1)
+        # The plane is the outline's bounding box; an L-shaped bulkhead's box spans most of the room. Keep the
+        # outline so searches can stay on the surface itself.
+        plane.outline = np.array([[p['x'], p['z']] for p in outline], np.float32)
+        return plane, height
 
     ceiling = room['ceiling']
     result = [surface('ceiling', room['floor'], ceiling['height'])]

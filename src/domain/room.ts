@@ -67,6 +67,8 @@ export type Evidence = z.infer<typeof evidenceSchema>;
 // One line saying what an element is and its key dimension, for tooltips and the selection card.
 export function describeElement(room: Room, id: string): string {
   const wall = room.walls.findIndex(w => w.id === id);
+  const column = columnsOf(room).find(c => c.wallIds.includes(id));
+  if (column) return `${columnName(column)} · ${column.height.toFixed(2)} m high · this face ${wallLength(room.walls[wall]).toFixed(2)} m`;
   if (wall >= 0) return `Wall ${wall + 1} · ${wallLength(room.walls[wall]).toFixed(2)} m long · ${room.walls[wall].height.toFixed(2)} m high`;
   const opening = room.openings.find(o => o.id === id);
   if (opening) return `${opening.kind[0].toUpperCase()}${opening.kind.slice(1)} · ${opening.width.toFixed(2)} × ${opening.height.toFixed(2)} m`;
@@ -104,6 +106,50 @@ export function signedArea(points: Point[]): number {
   }, 0) / 2;
 }
 export const floorArea = (room: Room) => Math.abs(signedArea(room.floor));
+
+// Columns, read from the walls. RoomPlan has no columns: it draws a column's exposed faces as short walls. Walking
+// round the room, a corner column is two short walls between an ordinary corner, a corner turning into the room and
+// another ordinary corner; a column standing out of a wall is three short walls with the two middle corners turning
+// into the room (the other way round is a niche). Sizes are the face lengths, which match the LiDAR. Only full-height
+// boxes count; anything else is left as walls.
+export type Column = { kind: 'corner' | 'wall'; wallIds: string[]; width: number; depth: number; height: number };
+const COLUMN_SIDE = 0.8, SQUARE = 0.26, JOIN = 0.03;
+export function columnsOf(room: Room): Column[] {
+  const walls = room.walls;
+  if (walls.length < 4) return [];
+  // The wall list is not in walking order; follow the corners instead.
+  const next = new Map(walls.map(w => [w.id, walls.find(v => v !== w && distance(w.end, v.start) < JOIN)]));
+  const direction = (w: Wall) => { const l = wallLength(w); return { x: (w.end.x - w.start.x) / l, z: (w.end.z - w.start.z) / l }; };
+  const bend = (a: Wall, b: Wall) => { const p = direction(a), q = direction(b); return p.x * q.z - p.z * q.x; };
+  // Going round a room, the usual corners outnumber the ones turning into it, so the bends add up to its direction.
+  const orientation = Math.sign(walls.reduce((sum, w) => { const v = next.get(w.id); return v ? sum + bend(w, v) : sum; }, 0));
+  // +1 for a corner that turns the usual way round the room, -1 for one that turns into it, 0 if not square.
+  const turn = (a: Wall, b: Wall) => {
+    const p = direction(a), q = direction(b);
+    return Math.abs(p.x * q.x + p.z * q.z) > SQUARE ? 0 : Math.sign(bend(a, b) * orientation);
+  };
+  const short = (w?: Wall): w is Wall => !!w && wallLength(w) <= COLUMN_SIDE;
+  // A column runs the full height: its faces are as tall as each other and as the walls either side. Faces of
+  // different heights are a step in the wall (under a beam, beside a low partition), not a column.
+  const fullHeight = (faces: Wall[], sides: Wall[]) => Math.max(...faces.map(w => w.height)) - Math.min(...faces.map(w => w.height)) <= 0.05
+    && Math.min(...faces.map(w => w.height)) >= Math.min(...sides.map(w => w.height)) - 0.05;
+  const used = new Set<string>(), columns: Column[] = [];
+  for (const a of walls) {
+    const b = next.get(a.id), c = b && next.get(b.id), d = c && next.get(c.id), e = d && next.get(d.id);
+    if (!b || !c || !d || [b, c, d].some(w => used.has(w.id)) || wallLength(a) <= COLUMN_SIDE) continue;
+    const corners = [turn(a, b), turn(b, c), turn(c, d)];
+    if (e && short(b) && short(c) && short(d) && wallLength(e) > COLUMN_SIDE && corners[0] === 1 && corners[1] === -1 && corners[2] === -1 && turn(d, e) === 1
+        && Math.abs(wallLength(b) - wallLength(d)) < 0.05 && fullHeight([b, c, d], [a, e])) {
+      columns.push({ kind: 'wall', wallIds: [b.id, c.id, d.id], width: wallLength(c), depth: (wallLength(b) + wallLength(d)) / 2, height: Math.min(b.height, c.height, d.height) });
+      [b, c, d].forEach(w => used.add(w.id));
+    } else if (short(b) && short(c) && wallLength(d) > COLUMN_SIDE && corners[0] === 1 && corners[1] === -1 && corners[2] === 1 && fullHeight([b, c], [a, d])) {
+      columns.push({ kind: 'corner', wallIds: [b.id, c.id], width: wallLength(b), depth: wallLength(c), height: Math.min(b.height, c.height) });
+      [b, c].forEach(w => used.add(w.id));
+    }
+  }
+  return columns;
+}
+export const columnName = (column: Column) => `${column.kind === 'corner' ? 'Corner column' : 'Column'} · ${Math.round(column.width * 100)} × ${Math.round(column.depth * 100)} cm`;
 export const perimeter = (room: Room) => room.walls.reduce((sum, wall) => sum + wallLength(wall), 0);
 const cross = (a: Point, b: Point, c: Point) => (b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x);
 function intersects(a: Point, b: Point, c: Point, d: Point): boolean {
@@ -162,6 +208,26 @@ export function newRoom(name: string, width = 5, depth = 4, height = 2.7): Room 
   const now = new Date().toISOString();
   return parseRoom({ schemaVersion: 1, id: crypto.randomUUID(), name, createdAt: now, updatedAt: now, units: 'meters', coordinateSystem: 'right-handed-y-up', source: 'manual', floor, floorEvidence: 'manual', walls: wallsFromFloor(floor, height, 'edited'), openings: [], objects: [], warnings: [], notes: '' });
 }
+// The floor from one tape measurement. The ceiling is measured well by LiDAR, but a shiny floor reflects it and the
+// scan can put the floor 20 cm off. Given the real floor-to-ceiling height, every height is moved onto the real floor;
+// tops of walls, doors and windows stay where they are, so their heights shrink or grow with it.
+export function setRoomHeight(room: Room, measuredHeight: number): Room {
+  if (!room.ceiling) throw new Error('This room has no measured ceiling to measure the height to.');
+  if (!(measuredHeight > 1.5 && measuredHeight < 12)) throw new Error('Enter the floor-to-ceiling height in metres.');
+  const up = room.ceiling.height - measuredHeight;  // how far the real floor is above the scanned one
+  if (Math.abs(up) > 0.5) throw new Error(`That is ${Math.abs(up).toFixed(2)} m from the scanned height; measure to the main ceiling, not a beam or a lower part.`);
+  const note = `Heights set from a tape-measured room height of ${measuredHeight.toFixed(3)} m (floor moved ${up >= 0 ? 'up' : 'down'} ${Math.abs(up * 100).toFixed(1)} cm).`;
+  return parseRoom({ ...room, updatedAt: new Date().toISOString(),
+    walls: room.walls.map(w => ({ ...w, height: w.height - up, evidence: 'edited' as const })),
+    openings: room.openings.map(o => { const sill = Math.max(0, o.sill - up); return { ...o, sill, height: o.sill + o.height - up - sill, evidence: 'edited' as const }; }),
+    ceiling: { ...room.ceiling, height: measuredHeight, regions: room.ceiling.regions.map(d => ({ ...d, height: d.height - up })),
+      items: room.ceiling.items?.map(i => ({ ...i, height: i.height - up })) },
+    ...(room.fixtures ? { fixtures: room.fixtures.map(f => ({ ...f, sill: Math.max(0, f.sill - up) })) } : {}),
+    objects: room.objects.map(o => ({ ...o, position: { ...o.position, y: o.position.y - up } })),
+    warnings: [...room.warnings.filter(w => !w.startsWith('Heights set from a tape-measured') && !w.startsWith('Heights measured from')), note],
+  });
+}
+
 export function calibrateRoom(room: Room, measuredLength: number, wallId: string): Room {
   const wall = room.walls.find(w => w.id === wallId);
   if (!wall || measuredLength <= 0) throw new Error('Select a wall and enter a positive reference length.');

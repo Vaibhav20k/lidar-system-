@@ -20,7 +20,9 @@ import base64
 import hashlib
 import json
 import os
+import socket
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -28,6 +30,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from refit_walls import fit_wall
 from elevation import Wall, best_frames, build_wall, ceiling_surfaces, depth_beyond, depth_points, load_scan, matrix, natural_crop, render_patch
 
 HERE = Path(__file__).resolve().parent
@@ -78,7 +81,7 @@ The FIRST image is a straightened view of a {size:.0f} cm square of the surface 
 
 Reply with JSON only:
 {{"present": true or false, "kind": one of {kinds}, "box": [ymin, xmin, ymax, xmax], "switches": integer or null, "sockets": integer or null, "confidence": 0 to 1, "note": "short reason"}}
-Box values are integers from 0 to 1000 as fractions of the FIRST image's height and width, around the part of the item that touches the surface. "switches" and "sockets" apply to electrical plates only; use null when they do not apply or cannot be read. A lit lamp with glare around it is still a light. A "hole" is a real opening or cut-out, not a stain or shadow. If nothing of these kinds is at the centre, set present to false."""
+Box values are integers from 0 to 1000 as fractions of the FIRST image's height and width, around the part of the item that touches the surface. "switches" and "sockets" apply to electrical plates only; use null when they do not apply or cannot be read. A lit lamp with glare around it is still a light; so is a spotlight, a short black or white cylinder with a bright round lens at one end, even when it looks like a rod or pipe. A "hole" is a real opening or cut-out, not a stain or shadow. The detector's position can be a few cm off, so the item may sit a little away from the centre: judge the middle half of the image. If nothing of these kinds is there, set present to false."""
 
 AC_PROMPT = """Each image is a straightened close-up of the same {width:.1f} m wide part of an interior wall, taken from different camera frames. A depth sensor found a box about {box_w:.0f} cm wide and {box_h:.0f} cm tall standing {proud:.0f} cm out from the wall near the centre, {bottom:.1f} m above the floor.
 
@@ -96,6 +99,18 @@ def api_key():
             if line.strip().startswith('OPENROUTER_API_KEY='):
                 key = line.split('=', 1)[1].strip().strip('"\'')
     return key
+
+
+ATTEMPTS = 3        # tries per model request before giving up
+OUTLINE_MARGIN = 0.05   # metres a ceiling candidate may sit outside its region's outline (edge fittings)
+SAME_SPOT = 0.2         # ceiling items closer than this are one item seen twice
+LOCAL = 0.3             # the wall around an item is measured this far either side of it
+LOCAL_POINTS = 150      # LiDAR points needed there to trust the measurement
+SWEEP_VIEWS, SWEEP_SIZE, SWEEP_PPM = 5, 0.45, 300   # photo agreement check: frames, patch edge (m), pixels per metre
+SWEEP_REACH = 0.15      # how far in front of or behind the measured surface it looks
+SWEEP_GAIN = 0.85       # the best depth must cut the disagreement by this much to be used
+CLOSE_UP_VIEWS = 5      # camera frames looked at for each item
+PHOTOS_AGREE = 0.03     # close-ups agreeing within this show the item in the same place
 
 
 class Model:
@@ -116,11 +131,19 @@ class Model:
             'messages': [{'role': 'user', 'content': [{'type': 'text', 'text': prompt}] + [{'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{b}'}} for b in encoded]}],
         }
         request = urllib.request.Request('https://openrouter.ai/api/v1/chat/completions', data=json.dumps(body).encode(), headers={'Authorization': f'Bearer {self.key}', 'Content-Type': 'application/json', 'X-Title': 'Roomform fixture detection'})
-        try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                reply = json.loads(response.read())
-        except urllib.error.HTTPError as error:
-            raise SystemExit(f'OpenRouter returned {error.code}: {error.read().decode()[:400]}')
+        # A slow or dropped reply, or a busy provider, is worth another try; one failure must not lose the room.
+        for attempt in range(ATTEMPTS):
+            try:
+                with urllib.request.urlopen(request, timeout=120) as response:
+                    reply = json.loads(response.read())
+                break
+            except urllib.error.HTTPError as error:
+                if error.code not in (408, 429, 500, 502, 503, 504) or attempt == ATTEMPTS - 1:
+                    raise SystemExit(f'OpenRouter returned {error.code}: {error.read().decode()[:400]}')
+            except (socket.timeout, TimeoutError, urllib.error.URLError, ConnectionError) as error:
+                if attempt == ATTEMPTS - 1:
+                    raise SystemExit(f'OpenRouter did not answer after {ATTEMPTS} tries: {error}')
+            time.sleep(5 * (attempt + 1))
         if 'error' in reply:
             raise SystemExit(f"OpenRouter error: {json.dumps(reply['error'])[:400]}")
         usage = reply.get('usage', {})
@@ -198,6 +221,9 @@ def propose(model, surface, image, ppm, prompt, out, tag):
 def merge(items):
     """Collapse detections of the same item seen in overlapping tiles, keeping the most confident."""
     def same(a, b):
+        # A light and the box it is mounted on overlap but are two things; plates of any kind on one spot are one plate.
+        if (a['kind'] == 'light') != (b['kind'] == 'light'):
+            return False
         # Same item if the boxes mostly coincide. Neighbouring plates touch or sit side by side, so centre distance alone would swallow them.
         overlap_u = min(a['u'] + a['width'] / 2, b['u'] + b['width'] / 2) - max(a['u'] - a['width'] / 2, b['u'] - b['width'] / 2)
         overlap_v = min(a['v'] + a['height'] / 2, b['v'] + b['height'] / 2) - max(a['v'] - a['height'] / 2, b['v'] - b['height'] / 2)
@@ -212,11 +238,111 @@ def merge(items):
     return kept
 
 
-def confirm(model, surface, frames, candidate, out, tag, is_wall):
+def same_place(items):
+    """One ceiling item per spot and kind: a lamp's body and head, or one lamp seen on two surfaces, become one entry."""
+    kept = []
+    for item in sorted(items, key=lambda i: -i['confidence']):
+        # Only the same kind: a spotlight and the conduit box it is mounted on sit a hand's width apart and are both real.
+        if not any(item['kind'] == k['kind'] and np.hypot(item['x'] - k['x'], item['z'] - k['z']) < SAME_SPOT for k in kept):
+            kept.append(item)
+    return kept
+
+
+def local_surface(surface, cloud, center):
+    """The surface right around one spot, from the LiDAR: the plane moved to where the wall around the item really
+    is, and whether there is solid wall there at all.
+
+    A wall is not one flat plane: a strip beside a glass partition, a pier or a patch of cladding can sit several
+    cm off the rest. Projecting a close-up onto the wrong depth slides the item sideways, by more the more slanted
+    the photo, and an opening check made at the wrong depth sees "through" solid wall.
+    """
+    if cloud is None:
+        return surface, False
+    points, normals = cloud
+    rel = points - (surface.origin + surface.axis_x * center[0] + surface.axis_y * center[1])
+    a, b, n = rel @ surface.axis_x, rel @ surface.axis_y, rel @ surface.inward
+    near = (np.abs(a) < LOCAL) & (np.abs(b) < LOCAL) & (np.abs(n) < 0.6) & (normals @ surface.inward > 0.8)
+    if near.sum() < LOCAL_POINTS:
+        return surface, False
+    hist, edges = np.histogram(n[near], bins=np.arange(-0.6, 0.61, 0.01))
+    support = np.convolve(hist, np.ones(3), 'same')
+    layer = edges[support.argmax()] + 0.005
+    on = near & (np.abs(n - layer) < 0.02)
+    if on.sum() < LOCAL_POINTS:
+        return surface, False
+    offset = float(np.median(n[on]))
+    moved = Wall.plane(surface.id, surface.origin + surface.inward * offset, surface.axis_x, surface.inward, surface.width, surface.height)
+    moved.axis_y = surface.axis_y.copy()
+    return moved, True
+
+
+def agreeing_photos(patches, ppm):
+    """The largest group of close-ups that show the spot in the same place, best-ranked first.
+
+    Each close-up is one camera frame projected onto the surface. Lined up against each other, the frames that saw
+    it correctly agree within a few cm; a frame taken at a steep angle beside glass, or whose pose slipped, lands
+    10-20 cm away. The model must place the item on an agreeing frame, never on the odd one out.
+    Returns (indices into patches, the largest distance between them in metres).
+    """
+    def edges(image):
+        gray = cv2.GaussianBlur(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32), (5, 5), 0)
+        magnitude = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0)) + np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1))
+        return magnitude * cv2.createHanningWindow(magnitude.shape[::-1], cv2.CV_32F)
+    shapes = {p.shape[:2] for p in patches}
+    if len(patches) < 2 or len(shapes) > 1:
+        return list(range(len(patches))), None
+    lined = [edges(p) for p in patches]
+    apart = np.array([[np.hypot(*cv2.phaseCorrelate(a, b)[0]) / ppm for b in lined] for a in lined])
+    groups = [[j for j in range(len(patches)) if apart[i, j] <= PHOTOS_AGREE] for i in range(len(patches))]
+    best = max(range(len(patches)), key=lambda i: (len(groups[i]), -i))  # ties go to the better-ranked frame
+    group = groups[best]
+    group = [best] + [j for j in group if j != best]
+    return group, float(apart[np.ix_(group, group)].max())
+
+
+def agreeing_depth(surface, frames, center):
+    """Fine-tune a wall item's depth from the photos alone: try planes a centimetre apart and keep the one where the
+    camera frames agree best on what is there. On the right plane every photo puts the item in the same place; on a
+    wrong one each slides by its own angle. This settles items next to glass or mirrors, whose LiDAR depth is
+    unreliable. Returns the surface moved to that plane, or the surface unchanged when the photos cannot tell."""
+    views = best_frames(surface, frames, center, limit=SWEEP_VIEWS)
+    if len(views) < 3:
+        return surface
+    def moved(offset):
+        plane = Wall.plane(surface.id, surface.origin + surface.inward * offset, surface.axis_x, surface.inward, surface.width, surface.height)
+        plane.axis_y = surface.axis_y.copy()
+        return plane
+    def disagreement(plane):
+        images = [render_patch(plane, frames[i], center, (SWEEP_SIZE, SWEEP_SIZE), SWEEP_PPM) for i in views]
+        images = [cv2.GaussianBlur(cv2.cvtColor(im, cv2.COLOR_BGR2GRAY).astype(np.float32), (5, 5), 0) for im in images if im is not None]
+        if len(images) < 3:
+            return None
+        stack = np.stack(images)
+        valid = np.all(stack > 0, axis=0)
+        if valid.mean() < 0.6:
+            return None
+        # Compare edges, not brightness: frames differ in exposure.
+        edges = np.stack([np.abs(cv2.Sobel(im, cv2.CV_32F, 1, 0)) + np.abs(cv2.Sobel(im, cv2.CV_32F, 0, 1)) for im in images])
+        return float(np.mean(np.std(edges, axis=0)[valid]) / (np.mean(edges[:, valid]) + 1e-6))
+    scores = [(score, offset) for offset in np.arange(-SWEEP_REACH, SWEEP_REACH + 1e-9, 0.01) if (score := disagreement(moved(offset))) is not None]
+    if len(scores) < 5:
+        return surface
+    best, offset = min(scores)
+    at_zero = next((s for s, o in scores if abs(o) < 1e-9), None)
+    # Only move when the photos clearly agree better somewhere else; a plain wall with nothing to line up says nothing.
+    if at_zero is None or best > SWEEP_GAIN * at_zero:
+        return surface
+    return moved(offset)
+
+
+def confirm(model, surface, frames, candidate, out, tag, is_wall, cloud=None):
     """Stage 2: verify one candidate on seam-free single-frame close-ups and refine its box."""
     center = (candidate['u'], candidate['v'])
-    views = best_frames(surface, frames, center)
     if is_wall:
+        surface, solid = local_surface(surface, cloud, center)
+        surface = agreeing_depth(surface, frames, center)
+    views = best_frames(surface, frames, center, limit=CLOSE_UP_VIEWS)
+    if is_wall and not solid:  # with solid wall measured all round the item, it is not seen through an opening
         beyond = [d for d in (depth_beyond(surface, frames[i], center) for i in views) if d is not None]
         if beyond and float(np.median(beyond)) > BEHIND_WALL and candidate['kind'] != 'hole':
             print(f"  {tag}: skipped, seen {np.median(beyond):.2f} m behind the wall through an opening")
@@ -224,11 +350,14 @@ def confirm(model, surface, frames, candidate, out, tag, is_wall):
     # Big items need a wider close-up; keep the image near 850 px either way.
     patch = PATCH if max(candidate['width'], candidate['height']) < 0.4 else min(2.2, max(candidate['width'], candidate['height']) * 1.8)
     ppm = min(1200, 850 / patch)
-    patches = [p for p in (render_patch(surface, frames[i], center, (patch, patch), ppm) for i in views) if p is not None]
-    if not patches:
+    rendered = [(i, p) for i, p in ((i, render_patch(surface, frames[i], center, (patch, patch), ppm)) for i in views) if p is not None]
+    if not rendered:
         return None
-    # One straightened view to place the item, plus undistorted camera crops to recognise it.
-    photos = [c for c in (natural_crop(surface, frames[i], center, patch) for i in views) if c is not None]
+    seen = len(rendered)
+    group, spread = agreeing_photos([p for _, p in rendered], ppm)
+    views, patches = [rendered[g][0] for g in group], [rendered[g][1] for g in group]
+    # One straightened view to place the item, plus undistorted camera crops to recognise it, all from frames that agree.
+    photos = [c for c in (natural_crop(surface, frames[i], center, patch) for i in views[:3]) if c is not None]
     images = patches[:1] + photos
     for index, image in enumerate(images):
         cv2.imwrite(str(out / 'candidates' / f'{tag}_{index}.jpg'), image)
@@ -248,37 +377,77 @@ def confirm(model, surface, frames, candidate, out, tag, is_wall):
     count = lambda key: answer.get(key) if isinstance(answer.get(key), int) and kind in PLATES else None
     confidence = confidence_of(answer.get('confidence'))
     if len(patches) < 2:
-        confidence *= 0.7  # one camera frame cannot rule out glare, a shadow or a stitching accident
+        confidence *= 0.7  # one camera frame (or frames that disagree) cannot rule out glare, a shadow or a bad pose
     return {
         'u': u, 'v': v, 'width': width, 'height': height, 'kind': kind, 'switches': count('switches'), 'sockets': count('sockets'),
         'confidence': confidence, 'note': str(answer.get('note') or '')[:200], 'views': len(patches),
+        'placedBy': f'{len(group)} of {seen} photos agree within {spread * 100:.1f} cm' if spread is not None else f'{seen} photo(s)',
     }
 
 
+def real_surface(wall, points, normals, frames, floor_y):
+    """The wall as the LiDAR saw it, and how far that surface is in front of RoomPlan's plane at each position.
+
+    Photos must be projected onto the real surface: on a plane a few cm off, a plate seen at an angle lands to
+    the side of where it is, and two photos taken from different angles put it in two different places. A wall
+    too covered to fit keeps RoomPlan's plane.
+    """
+    fitted, _ = fit_wall(wall, points, normals, frames, floor_y, [])
+    if not fitted:
+        return wall, lambda u: 0.0
+    offset, slope = fitted[2]['offset'], fitted[2]['slope']
+    in_front = lambda u: offset + slope * (u + wall.width / 2)
+    axis_x = wall.axis_x + slope * wall.inward
+    inward = wall.inward - slope * wall.axis_x
+    surface = Wall.plane(wall.id, wall.origin + wall.inward * in_front(0.0), axis_x / np.linalg.norm(axis_x), inward / np.linalg.norm(inward), wall.width, wall.height)
+    surface.axis_y = wall.axis_y.copy()
+    return surface, in_front
+
+
 def wall_boxes(wall, points, normals, floor_y):
-    """Depth-only: flat faces 10-45 cm in front of a wall, as boxes. This is how AC units are proposed."""
+    """Depth-only: flat faces standing 10-45 cm out from a wall, as boxes. This is how AC units are proposed."""
     cell = 0.025
     rel = points - wall.origin
     a, b, n = rel @ wall.axis_x, rel @ wall.axis_y, rel @ wall.inward
-    ok = (np.abs(a) < wall.width / 2) & (np.abs(b) < wall.height / 2) & (n > 0.10) & (n < 0.45) & (normals @ wall.inward > 0.8)
+    facing = (np.abs(a) < wall.width / 2) & (np.abs(b) < wall.height / 2) & (normals @ wall.inward > 0.8)
+    proud_all = n
+    ok = facing & (proud_all > 0.07) & (proud_all < 0.48)
     cols, rows = max(1, int(wall.width / cell)), max(1, int(wall.height / cell))
     ix = ((a[ok] + wall.width / 2) / cell).astype(int).clip(0, cols - 1)
     iy = ((wall.height / 2 - b[ok]) / cell).astype(int).clip(0, rows - 1)
     count, total = np.zeros((rows, cols), np.int32), np.zeros((rows, cols))
     np.add.at(count, (iy, ix), 1)
-    np.add.at(total, (iy, ix), n[ok])
-    mask = cv2.morphologyEx(cv2.morphologyEx((count >= 3).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-    number, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+    np.add.at(total, (iy, ix), proud_all[ok])
+    depth = total / np.maximum(count, 1)
     base = wall.origin[1] - wall.height / 2 - floor_y  # walls that start above the floor
     boxes = []
-    for i in range(1, number):
-        x, y, w, h, area = stats[i]
-        proud = float(np.median((total / np.maximum(count, 1))[(labels == i) & (count > 0)]))
-        boxes.append({
-            'u': (x + w / 2) * cell - wall.width / 2, 'v': wall.height / 2 - (y + h / 2) * cell, 'width': w * cell, 'height': h * cell,
-            'proud': proud, 'bottom': base + wall.height - (y + h) * cell, 'fill': area / (w * h),
-        })
-    return boxes
+    # The whole 10-45 cm band at once finds a unit with a rounded front (its depth varies by several cm), and one
+    # depth layer at a time separates a unit from a bulkhead edge or shelf right next to it. Both are tried.
+    bands = [(0.275, 0.175)] + [(layer, 0.035) for layer in np.arange(0.10, 0.42, 0.02)]
+    for layer, reach in bands:
+        solid = ((count >= 3) & (np.abs(depth - layer) <= reach)).astype(np.uint8)
+        mask = cv2.morphologyEx(cv2.morphologyEx(solid, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+        number, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+        for i in range(1, number):
+            x, y, w, h, area = stats[i]
+            inside = (labels == i) & (count > 0)
+            boxes.append({
+                'u': (x + w / 2) * cell - wall.width / 2, 'v': wall.height / 2 - (y + h / 2) * cell, 'width': w * cell, 'height': h * cell,
+                'proud': float(np.median(depth[inside])), 'bottom': base + wall.height - (y + h) * cell, 'fill': area / (w * h),
+            })
+    # The same face found in several bands: keep one box per face, preferring an AC-shaped one, then the largest
+    # (a small fragment is always "full" and must not push out the whole unit).
+    kept = []
+    for box in sorted(boxes, key=lambda b: (not ac_like(b), -b['width'] * b['height'])):
+        # Boxes that cover the same part of the wall are one unit seen in several bands (its top, its rounded
+        # front, its louvres), whatever their depth.
+        def overlaps(k):
+            du = min(box['u'] + box['width'] / 2, k['u'] + k['width'] / 2) - max(box['u'] - box['width'] / 2, k['u'] - k['width'] / 2)
+            dv = min(box['v'] + box['height'] / 2, k['v'] + k['height'] / 2) - max(box['v'] - box['height'] / 2, k['v'] - k['height'] / 2)
+            return du > 0 and dv > 0 and du * dv > 0.3 * min(box['width'] * box['height'], k['width'] * k['height'])
+        if not any(overlaps(k) for k in kept):
+            kept.append(box)
+    return kept
 
 
 def ac_like(box):
@@ -313,6 +482,7 @@ def common(item):
     return {
         'kind': item['kind'], 'width': round(item['width'], 3), 'height': round(item['height'], 3),
         'confidence': round(item['confidence'], 2), 'review': bool(item['confidence'] < REVIEW_BELOW), 'views': item['views'], 'note': item['note'], 'evidence': 'estimated',
+        **({'placedBy': item['placedBy']} if item.get('placedBy') else {}),
     }
 
 
@@ -350,11 +520,22 @@ def annotate(image, surface, ppm, items):
     return marked
 
 
-def search(model, surface, frames, ppm, prompt, out, tag, is_wall):
+def on_outline(surface, item):
+    """Whether a ceiling candidate lies on its surface's outline (always true for walls and plain planes)."""
+    outline = getattr(surface, 'outline', None)
+    if outline is None:
+        return True
+    x, _, z = surface.origin + surface.axis_x * item['u'] + surface.axis_y * item['v']
+    return cv2.pointPolygonTest(outline, (float(x), float(z)), True) >= -OUTLINE_MARGIN
+
+
+def search(model, surface, frames, ppm, prompt, out, tag, is_wall, cloud=None):
     image, _, _ = build_wall(surface, frames, ppm)
     cv2.imwrite(str(out / f'{tag}.png'), image)
-    candidates = propose(model, surface, image, ppm, prompt, out, tag)
-    confirmed = [r for r in (confirm(model, surface, frames, c, out, f'{tag}_{i}', is_wall) for i, c in enumerate(candidates)) if r] if model else []
+    # A lower region is photographed over its bounding box, which also shows the ceiling around it: what is seen
+    # there belongs to the main ceiling and is found on it already.
+    candidates = [c for c in propose(model, surface, image, ppm, prompt, out, tag) if on_outline(surface, c)]
+    confirmed = [r for r in (confirm(model, surface, frames, c, out, f'{tag}_{i}', is_wall, cloud) for i, c in enumerate(candidates)) if r] if model else []
     return image, candidates, merge(confirmed)
 
 
@@ -373,12 +554,14 @@ def main():
         raise SystemExit('OPENROUTER_API_KEY is not set. Put it in a .env file or run with --dry-run to only write the tiles.')
     capture, walls, frames = load_scan(capture_path, raw)
     floor_y = min(matrix(w['transform'])[1, 3] - w['height'] / 2 for w in capture['walls'])
-    points, normals = depth_points(raw)
+    points, normals, seen_at = depth_points(raw, with_frames=True)
 
     fixtures, ceiling_items = [], []
-    for number, wall in enumerate(walls, start=1):
-        image, candidates, confirmed = search(model, wall, frames, PPM, WALL_PROMPT, out, f'wall{number}', True)
-        boxes = [b for b in wall_boxes(wall, points, normals, floor_y) if ac_like(b)]
+    for number, scanned in enumerate(walls, start=1):
+        wall, in_front = real_surface(scanned, points, normals, seen_at, floor_y)
+        image, candidates, confirmed = search(model, wall, frames, PPM, WALL_PROMPT, out, f'wall{number}', True, (points, normals))
+        # Depth boxes are found against RoomPlan's plane (their limits were set that way), then measured from the real wall.
+        boxes = [dict(b, proud=b['proud'] - in_front(b['u'])) for b in wall_boxes(scanned, points, normals, floor_y) if ac_like(b)]
         units = [r for r in (confirm_ac(model, wall, frames, b, out, f'wall{number}_ac{i}') for i, b in enumerate(boxes)) if r] if model else []
         # Photo-only "AC" guesses have no depth behind them, and anything overlapping a confirmed unit is part of it.
         confirmed = merge(units + [c for c in confirmed if c['kind'] != 'ac_unit'])
@@ -395,6 +578,10 @@ def main():
             cv2.imwrite(str(out / f'{surface.id}_detected.jpg'), annotate(image, surface, CEILING_PPM, confirmed))
             ceiling_items += [to_ceiling_item(surface, height, item) for item in confirmed]
             print(f'{surface.id} at {height:.2f} m: {len(candidates)} candidates, {len(confirmed)} confirmed')
+        before = len(ceiling_items)
+        ceiling_items = same_place(ceiling_items)
+        if before > len(ceiling_items):
+            print(f'ceiling: {before - len(ceiling_items)} repeated sightings of the same item dropped')
 
     if model is None:
         print(f"dry run: tiles written to {out / 'tiles'}; nothing was sent")

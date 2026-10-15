@@ -5,7 +5,7 @@ Usage: refit_walls.py <capture.json> <raw-bundle-dir> <room.json> <out-room.json
 RoomPlan squares every corner to exactly 90 degrees. Real rooms are 0.2-3 degrees out of square, so along a
 4-5 m wall its corners can be 4-11 cm from the real ones. For each wall this script:
   1. takes the LiDAR points near RoomPlan's wall plane that face into the room, leaving out doors and windows;
-  2. on each 50 cm stretch, finds the back-most surface with real support, band by band up the wall
+  2. on each 50 cm stretch, finds the back-most surface with real support, band by band between 0.3 and 1.9 m
      (whiteboards, panels and cabinets hang in front of a wall, never behind it, and rarely cover it top to bottom), drops stretches that disagree with the rest, and fits a vertical
      plane through the others, letting it shift and turn a little;
   3. checks that small patches of the wall seen early and late in the scan agree, and keeps RoomPlan's line if
@@ -32,10 +32,14 @@ MAX_TURN = np.radians(3)   # real rooms measured so far are 0.2-3 degrees out of
 MAX_CORNER_MOVE = 0.2
 STRETCH = 0.5         # the wall is looked at in stretches this long
 BAND = 0.4            # and, within a stretch, in height bands this tall
+# A wall is measured where a tape would be held and where switches are. Above that, many walls step back (a ledge
+# with the upper wall recessed) or carry whiteboards; the lower wall is what the room's size is measured against.
+TAPE_LOW, TAPE_HIGH = 0.3, 1.5
 BACK_SHARE = 0.25     # a layer needs this share of the stretch's densest layer to count as a surface
 AGREE = 0.015         # stretches whose wall position is further than this from the line are dropped
 MIN_AGREEING = 0.6    # at least this share of a wall's stretches must agree
 MIN_TURN_SPAN = 1.5   # a wall seen along less than this may shift but not turn
+MIN_TURN_STRETCHES = 5   # nor one with fewer agreeing stretches than this
 CELL = 0.25           # wall patch size for the tracking check
 MAX_SLIP = 0.025      # patches seen early and late in the scan must agree within this (90% of them)
 MIN_CORNER_ANGLE = np.radians(20)  # walls meeting flatter than this do not give a reliable crossing
@@ -50,7 +54,7 @@ def fit_line(wall: Wall, a, d, h):
     for s0 in np.arange(0, wall.width, STRETCH):
         backs = []
         # Look band by band up the wall: below a whiteboard a table may hide the wall, above it the wall shows.
-        for b0 in np.arange(0.15, wall.height, BAND):
+        for b0 in np.arange(TAPE_LOW, TAPE_HIGH, BAND):
             part = (a >= s0) & (a < s0 + STRETCH) & (h >= b0) & (h < b0 + BAND)
             if part.sum() < 60:
                 continue
@@ -86,7 +90,7 @@ def fit_line(wall: Wall, a, d, h):
     if keep.mean() < MIN_AGREEING:
         return None, f'only {keep.sum()} of {len(keep)} stretches agree on where the wall is (much of it covered)', None
     # Over a short run a centimetre of noise already reads as a turn of a degree or two: shift only.
-    turnable = np.ptp(centres[keep]) + STRETCH >= MIN_TURN_SPAN
+    turnable = np.ptp(centres[keep]) + STRETCH >= MIN_TURN_SPAN and keep.sum() >= MIN_TURN_STRETCHES
     if not turnable:
         slope, offset = 0.0, float(np.median(layers[keep]))
     if np.ptp(centres[keep]) + STRETCH < max(0.3, MIN_SPAN * wall.width):
@@ -115,7 +119,7 @@ def fit_wall(wall: Wall, points, normals, frames, floor_y, openings):
     across, along, up = rel @ wall.inward, rel @ wall.axis_x + wall.width / 2, rel @ wall.axis_y
     height = points[:, 1] - floor_y
     near = ((np.abs(across) < NEAR) & (along > 0) & (along < wall.width) & (normals @ wall.inward > FACING)
-            & (height > 0.15) & (height < wall.height - 0.15) & (np.abs(up) < wall.height / 2))
+            & (height > TAPE_LOW) & (height < min(TAPE_HIGH + BAND, wall.height - 0.15)) & (np.abs(up) < wall.height / 2))
     # Through a door or window the camera sees whatever is beyond it.
     for o in openings:
         near &= ~((along > o['offset'] - 0.05) & (along < o['offset'] + o['width'] + 0.05) & (height > o['sill'] - 0.05) & (height < o['sill'] + o['height'] + 0.05))
@@ -146,7 +150,7 @@ def fit_wall(wall: Wall, points, normals, frames, floor_y, openings):
     flat = lambda v: np.array([v[0], v[2]])
     direction = flat(wall.axis_x) + slope * flat(wall.inward)
     start = flat(wall.origin) - flat(wall.axis_x) * wall.width / 2
-    info.update(shift=offset + slope * wall.width / 2, turn=np.degrees(np.arctan(slope)))
+    info.update(shift=offset + slope * wall.width / 2, turn=np.degrees(np.arctan(slope)), offset=offset, slope=slope)
     return (start + offset * flat(wall.inward), direction / np.linalg.norm(direction), info), None
 
 

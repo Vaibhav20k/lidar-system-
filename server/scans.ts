@@ -76,9 +76,9 @@ export function mountScans(app: express.Express, dataDirectory: string) {
     jobs.set(id, job);
     res.status(202).json({ status: 'processing' });
     void (async () => {
-      let latest = plain;
+      let latest = plain, measuredCeiling = false;
       // A ceiling that cannot be measured must not stop the rest: the room is still usable without it.
-      try { await run(python, [join(scripts, 'ceiling.py'), capture, bundle, plain, withCeiling]); latest = withCeiling; job.notes.push('Ceiling measured from depth.'); }
+      try { await run(python, [join(scripts, 'ceiling.py'), capture, bundle, plain, withCeiling]); latest = withCeiling; measuredCeiling = true; job.notes.push('Ceiling measured from depth.'); }
       catch (e) { job.notes.push(`Ceiling not measured: ${e instanceof Error ? e.message : 'unknown error'}`); }
       // RoomPlan's furniture boxes run wide; pull broad-fronted furniture in to the edges seen on the photos.
       job.stage = 'Fitting furniture to its real edges';
@@ -87,7 +87,8 @@ export function mountScans(app: express.Express, dataDirectory: string) {
       if (detect) {
         job.stage = 'Looking for switches, lights, holes and AC units';
         try {
-          await run(python, [join(scripts, 'detect.py'), capture, bundle, found, ...(latest === withCeiling ? ['--room', withCeiling] : [])]);
+          // The ceiling is searched for lights and holes only when it was measured.
+          await run(python, [join(scripts, 'detect.py'), capture, bundle, found, ...(measuredCeiling ? ['--room', withCeiling] : [])]);
           await run(python, [join(scripts, 'apply_fixtures.py'), latest, join(found, 'fixtures.json'), full]);
           latest = full; job.notes.push('Fixtures found on scan photos.');
         } catch (e) { job.notes.push(`Fixtures not detected: ${e instanceof Error ? e.message : 'unknown error'}`); }
