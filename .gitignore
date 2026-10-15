@@ -21,3 +21,6 @@ ios/App/App/public/
 ios/App/App/capacitor.config.json
 *.xcuserstate
 **/xcuserdata/
+
+# Point clouds made from private scans; large and not for the repo.
+public/clouds/

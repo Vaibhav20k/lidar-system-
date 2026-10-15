@@ -20,7 +20,8 @@ public class RoomScannerPlugin: CAPPlugin, CAPBridgedPlugin {
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "capabilities", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "scan", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "shareOriginal", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "shareOriginal", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "enhance", returnType: CAPPluginReturnPromise)
     ]
     private var scanning = false
 
@@ -85,6 +86,91 @@ public class RoomScannerPlugin: CAPPlugin, CAPBridgedPlugin {
             }
             presenter.present(sheet, animated: true)
         }
+    }
+
+    /// Sends a scan's raw bundle to a Roomform server, waits while it measures the ceiling and looks for fixtures,
+    /// and resolves with the enriched room. Progress is reported through "enhanceProgress" events.
+    @objc func enhance(_ call: CAPPluginCall) {
+        guard let rawPath = call.getString("rawPath"), let base = call.getString("url"), let server = URL(string: base),
+              let payload = call.getString("payload")?.data(using: .utf8) else {
+            call.reject("The scan or the server address is missing."); return
+        }
+        let raw = URL(fileURLWithPath: rawPath).standardizedFileURL
+        let root = Self.scanDirectory.standardizedFileURL.path + "/"
+        guard raw.path.hasPrefix(root), raw.lastPathComponent.hasSuffix("-raw"), FileManager.default.fileExists(atPath: raw.path) else {
+            call.reject("The raw scan data is no longer on this device."); return
+        }
+        let id = String(raw.lastPathComponent.dropLast("-raw".count)), token = call.getString("token") ?? ""
+        Task.detached(priority: .userInitiated) {
+            // Processing takes minutes; a sleeping phone would drop the connection.
+            await MainActor.run { UIApplication.shared.isIdleTimerDisabled = true }
+            do {
+                let result = try await Self.process(scan: id, raw: raw, server: server, token: token, payload: payload) { stage in
+                    self.notifyListeners("enhanceProgress", data: ["stage": stage])
+                }
+                call.resolve(result)
+            } catch { call.reject(error.localizedDescription) }
+            await MainActor.run { UIApplication.shared.isIdleTimerDisabled = false }
+        }
+    }
+
+    private static func failure(_ message: String) -> NSError {
+        NSError(domain: "Roomform", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    private static func process(scan id: String, raw: URL, server: URL, token: String, payload: Data, progress: @escaping (String) -> Void) async throws -> [String: Any] {
+        func request(_ path: String, _ method: String) -> URLRequest {
+            var value = URLRequest(url: server.appendingPathComponent(path))
+            value.httpMethod = method; value.timeoutInterval = 600
+            if !token.isEmpty { value.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+            return value
+        }
+        func body(_ data: Data, _ response: URLResponse) throws -> [String: Any] {
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                throw failure(json["error"] as? String ?? "The server could not process this scan.")
+            }
+            return json
+        }
+        progress("Preparing scan data")
+        let archive = try zip(raw, named: id)
+        defer { try? FileManager.default.removeItem(at: archive) }
+        progress("Sending scan to the server")
+        var upload = request("api/scans/\(id)/raw", "PUT")
+        upload.setValue("application/zip", forHTTPHeaderField: "Content-Type")
+        let sent = try await URLSession.shared.upload(for: upload, fromFile: archive)
+        _ = try body(sent.0, sent.1)
+        var start = request("api/scans/\(id)/process", "POST")
+        start.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let started = try await URLSession.shared.upload(for: start, from: payload)
+        _ = try body(started.0, started.1)
+        for _ in 0..<600 {  // three seconds apart: up to half an hour
+            try await Task.sleep(nanoseconds: 3_000_000_000)
+            let polled = try await URLSession.shared.data(for: request("api/scans/\(id)", "GET"))
+            let job = try body(polled.0, polled.1)
+            if let stage = job["stage"] as? String { progress(stage) }
+            switch job["status"] as? String {
+            case "done":
+                guard let room = job["room"] as? [String: Any] else { throw failure("The server returned no room.") }
+                return ["room": room, "notes": job["notes"] as? [String] ?? []]
+            case "failed": throw failure(job["error"] as? String ?? "Processing failed on the server.")
+            default: continue
+            }
+        }
+        throw failure("The server took too long to process this scan.")
+    }
+
+    /// Reading a folder "for uploading" makes the system hand over a zip of it.
+    private static func zip(_ folder: URL, named name: String) throws -> URL {
+        var coordination: NSError?
+        var result: Result<URL, Error> = .failure(failure("The scan data could not be packed."))
+        NSFileCoordinator().coordinate(readingItemAt: folder, options: [.forUploading], error: &coordination) { zipped in
+            let target = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).zip")
+            try? FileManager.default.removeItem(at: target)
+            result = Result { try FileManager.default.copyItem(at: zipped, to: target); return target }
+        }
+        if let coordination = coordination { throw coordination }
+        return try result.get()
     }
 
     /// Raw bundles are large and only needed for re-processing, so only the newest ones are kept.

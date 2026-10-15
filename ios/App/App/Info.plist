@@ -2,6 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Roomform sends your scan to the Roomform server on your network to measure the ceiling and find switches, lights and AC units.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
     <key>NSCameraUsageDescription</key>
     <string>Roomform uses the camera and LiDAR to measure walls, doors, windows, and furniture in your room.</string>
   <key>CAPACITOR_DEBUG</key>

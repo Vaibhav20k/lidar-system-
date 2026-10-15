@@ -15,11 +15,13 @@ export const openingSchema = z.object({
   offset: number.min(0), width: number.min(0.1).max(20),
   height: number.min(0.1).max(12), sill: number.min(0).max(10), evidence: evidenceSchema,
 });
-// Wall-mounted electrical plates found on scan photos. Placed like openings: offset along the wall from its start, sill above its base.
+// Things fixed to or cut into a wall, found on scan photos: electrical plates, lights, holes, AC units.
+// Placed like openings: offset along the wall from its start, sill above its base. `depth` is how far a unit stands out from the wall.
+const fixtureKind = z.enum(['switch_board', 'socket', 'switch', 'regulator', 'distribution_box', 'other_electrical', 'light', 'hole', 'ac_unit', 'junction_box']);
 export const fixtureSchema = z.object({
-  id, wallId: id, kind: z.enum(['switch_board', 'socket', 'switch', 'regulator', 'distribution_box', 'other_electrical']),
-  offset: number.min(0), width: number.min(0.02).max(1), height: number.min(0.02).max(1), sill: number.min(0).max(10),
-  evidence: evidenceSchema, confidence: number.min(0).max(1).optional(),
+  id, wallId: id, kind: fixtureKind,
+  offset: number.min(0), width: number.min(0.02).max(2), height: number.min(0.02).max(1), sill: number.min(0).max(10), depth: number.min(0).max(1).optional(),
+  evidence: evidenceSchema, confidence: number.min(0).max(1).optional(), review: z.boolean().optional(),
   switches: z.number().int().min(0).max(40).optional(), sockets: z.number().int().min(0).max(40).optional(),
   note: z.string().max(200).optional(),
 });
@@ -29,6 +31,9 @@ const outline = z.array(pointSchema).min(3).max(128);
 export const ceilingSchema = z.object({
   height: number.min(1).max(12), coverage: number.min(0).max(1).optional(),
   regions: z.array(z.object({ points: outline, holes: z.array(outline).max(32).optional(), height: number.min(0.5).max(12), evidence: evidenceSchema })).max(64),
+  // Lights, holes and boxes on the ceiling or under a lower region: world X/Z, the height of the surface they sit on, and a footprint turned by `rotation`.
+  items: z.array(z.object({ id, kind: fixtureKind, x: number.min(-500).max(500), z: number.min(-500).max(500), height: number.min(0.5).max(12), width: number.min(0.02).max(3), depth: number.min(0.02).max(3), rotation: number,
+    evidence: evidenceSchema, confidence: number.min(0).max(1).optional(), review: z.boolean().optional(), note: z.string().max(200).optional() })).max(256).optional(),
 });
 export const objectSchema = z.object({
   id, label: z.string().min(1).max(80), category: z.string().min(1).max(50),
@@ -56,8 +61,40 @@ export type Wall = Room['walls'][number];
 export type Opening = Room['openings'][number];
 export type RoomObject = Room['objects'][number];
 export type Fixture = z.infer<typeof fixtureSchema>;
+export const fixtureLabel = (kind: Fixture['kind']) => kind === 'ac_unit' ? 'AC unit' : kind.replace('_', ' ');
 export type Evidence = z.infer<typeof evidenceSchema>;
 
+// One line saying what an element is and its key dimension, for tooltips and the selection card.
+export function describeElement(room: Room, id: string): string {
+  const wall = room.walls.findIndex(w => w.id === id);
+  if (wall >= 0) return `Wall ${wall + 1} · ${wallLength(room.walls[wall]).toFixed(2)} m long · ${room.walls[wall].height.toFixed(2)} m high`;
+  const opening = room.openings.find(o => o.id === id);
+  if (opening) return `${opening.kind[0].toUpperCase()}${opening.kind.slice(1)} · ${opening.width.toFixed(2)} × ${opening.height.toFixed(2)} m`;
+  const object = room.objects.find(o => o.id === id);
+  if (object) return `${object.label[0].toUpperCase()}${object.label.slice(1)} · ${object.size.x.toFixed(2)} × ${object.size.z.toFixed(2)} × ${object.size.y.toFixed(2)} m`;
+  const fixture = room.fixtures?.find(f => f.id === id);
+  if (fixture) { const name = fixtureLabel(fixture.kind); return `${name[0].toUpperCase()}${name.slice(1)} · ${(fixture.sill + fixture.height / 2).toFixed(2)} m above floor`; }
+  const item = room.ceiling?.items?.find(i => i.id === id);
+  if (item) { const name = fixtureLabel(item.kind); return `${name[0].toUpperCase()}${name.slice(1)} on the ceiling · ${item.height.toFixed(2)} m up`; }
+  return '';
+}
+// Everything a person should look at before trusting it: fixtures the detector was unsure of, and furniture the scanner itself rated low.
+export const needsCheck = (room: Room): string[] => [
+  ...(room.fixtures ?? []).filter(f => f.review).map(f => f.id), ...(room.ceiling?.items ?? []).filter(i => i.review).map(i => i.id),
+  ...room.objects.filter(o => o.evidence === 'estimated').map(o => o.id),
+];
+// A person has looked at it and it is right.
+export function confirmElement(room: Room, id: string): Room {
+  return { ...room,
+    objects: room.objects.map(o => o.id === id ? { ...o, evidence: 'edited' as const } : o),
+    fixtures: room.fixtures?.map(f => f.id === id ? { ...f, review: undefined, evidence: 'edited' as const } : f),
+    ceiling: room.ceiling && { ...room.ceiling, items: room.ceiling.items?.map(i => i.id === id ? { ...i, review: undefined, evidence: 'edited' as const } : i) },
+  };
+}
+export function removeElement(room: Room, id: string): Room {
+  return { ...room, openings: room.openings.filter(o => o.id !== id), objects: room.objects.filter(o => o.id !== id), fixtures: room.fixtures?.filter(f => f.id !== id),
+    ceiling: room.ceiling && { ...room.ceiling, items: room.ceiling.items?.filter(i => i.id !== id) } };
+}
 export const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.z - b.z);
 export const wallLength = (wall: Wall) => distance(wall.start, wall.end);
 export function signedArea(points: Point[]): number {
@@ -87,7 +124,7 @@ export function polygonErrors(points: Point[]): string[] {
 }
 export function parseRoom(value: unknown): Room {
   const room = roomSchema.parse(value);
-  const allIds = [...room.walls, ...room.openings, ...room.objects, ...(room.fixtures ?? [])].map(v => v.id);
+  const allIds = [...room.walls, ...room.openings, ...room.objects, ...(room.fixtures ?? []), ...(room.ceiling?.items ?? [])].map(v => v.id);
   if (new Set(allIds).size !== allIds.length) throw new Error('Room element IDs must be unique.');
   if (room.floor.length) {
     const errors = polygonErrors(room.floor);
@@ -134,8 +171,9 @@ export function calibrateRoom(room: Room, measuredLength: number, wallId: string
     floor: room.floor.map(p),
     walls: room.walls.map(w => ({ ...w, start: p(w.start), end: p(w.end), height: w.height * s, baseY: w.baseY * s, thickness: w.thickness * s, evidence: 'edited' })),
     openings: room.openings.map(o => ({ ...o, offset: o.offset * s, width: o.width * s, height: o.height * s, sill: o.sill * s, evidence: 'edited' })),
-    ...(room.ceiling ? { ceiling: { ...room.ceiling, height: room.ceiling.height * s, regions: room.ceiling.regions.map(d => ({ ...d, height: d.height * s, points: d.points.map(p), holes: d.holes?.map(h => h.map(p)), evidence: 'edited' as const })) } } : {}),
-    ...(room.fixtures ? { fixtures: room.fixtures.map(f => ({ ...f, offset: f.offset * s, sill: f.sill * s, width: Math.min(1, f.width * s), height: Math.min(1, f.height * s), evidence: 'edited' as const })) } : {}),
+    ...(room.ceiling ? { ceiling: { ...room.ceiling, height: room.ceiling.height * s, regions: room.ceiling.regions.map(d => ({ ...d, height: d.height * s, points: d.points.map(p), holes: d.holes?.map(h => h.map(p)), evidence: 'edited' as const })),
+      items: room.ceiling.items?.map(i => ({ ...i, ...p(i), height: i.height * s, width: Math.min(3, i.width * s), depth: Math.min(3, i.depth * s), evidence: 'edited' as const })) } } : {}),
+    ...(room.fixtures ? { fixtures: room.fixtures.map(f => ({ ...f, offset: f.offset * s, sill: f.sill * s, width: Math.min(2, f.width * s), height: Math.min(1, f.height * s), evidence: 'edited' as const })) } : {}),
     objects: room.objects.map(o => ({ ...o, position: { x: o.position.x * s, y: o.position.y * s, z: o.position.z * s }, size: { x: o.size.x * s, y: o.size.y * s, z: o.size.z * s }, evidence: 'edited' })),
     warnings: [...new Set([...room.warnings, 'Global scale calibrated from one reference. Local distortion still needs review.'])],
   });

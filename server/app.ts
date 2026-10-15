@@ -2,8 +2,9 @@ import express from 'express';
 import { DatabaseSync } from 'node:sqlite';
 import { timingSafeEqual } from 'node:crypto';
 import { parseRoom } from '../src/domain/room';
+import { mountScans } from './scans';
 
-export function createApp(database: string, token = '') {
+export function createApp(database: string, token = '', scanDirectory?: string) {
   const db = new DatabaseSync(database);
   db.exec('PRAGMA journal_mode = WAL; CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, body TEXT NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)');
   const app = express(); app.disable('x-powered-by');
@@ -12,7 +13,7 @@ export function createApp(database: string, token = '') {
     const origin = req.headers.origin;
     if (origin && !allowed.has(origin)) { res.status(403).json({ error: 'Origin is not allowed.' }); return; }
     if (origin) { res.setHeader('Access-Control-Allow-Origin', origin); res.setHeader('Vary', 'Origin'); }
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization'); res.setHeader('Access-Control-Allow-Methods', 'GET, PUT, OPTIONS'); res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization'); res.setHeader('Access-Control-Allow-Methods', 'GET, PUT, POST, OPTIONS'); res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Content-Type-Options', 'nosniff');
     if (req.method === 'OPTIONS') { res.sendStatus(204); return; }
     if (token) {
       const supplied = Buffer.from((req.headers.authorization ?? '').replace(/^Bearer /, '')), expected = Buffer.from(token);
@@ -45,6 +46,7 @@ export function createApp(database: string, token = '') {
       db.exec('COMMIT'); res.json({ revision: next });
     } catch (e) { db.exec('ROLLBACK'); throw e; }
   });
+  if (scanDirectory) mountScans(app, scanDirectory);
   app.use((_req, res) => res.status(404).json({ error: 'Endpoint not found.' }));
   app.use((err: Error & { status?: number }, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const status = err.status === 413 ? 413 : err instanceof SyntaxError ? 400 : 500;

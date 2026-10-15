@@ -1,24 +1,26 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { ScanLine, Plus, ArrowUpRight, Box, Layers2, Download, Upload, Settings2, Ruler, RotateCcw, Undo2, Save, Check, ChevronRight, Sofa, Eye, CloudUpload, FolderOpen, Trash2, LoaderCircle, Smartphone, Menu, X, PanelTop } from 'lucide-react';
-import { floorArea, newRoom, parseRoom, perimeter, type Room } from './domain/room';
+import { ScanLine, Plus, ArrowUpRight, Box, Layers2, Download, Upload, Settings2, Ruler, RotateCcw, Undo2, Save, Check, ChevronRight, Sofa, Eye, CloudUpload, FolderOpen, Trash2, LoaderCircle, Smartphone, Menu, X, PanelTop, Crosshair, Tag, Maximize2, Minimize2, Plug, CircleCheck, ListChecks, ArrowUp, ArrowDown, ArrowLeft, ArrowRight } from 'lucide-react';
+import { confirmElement, describeElement, floorArea, needsCheck, newRoom, parseRoom, perimeter, removeElement, type Room } from './domain/room';
 import { sampleRoom } from './domain/sample';
 import { normalizeCapture } from './domain/native';
 import { listRooms, saveRoom, deleteRoom, syncRoom, pullRooms } from './services/storage';
-import { captureCapabilities, scanRooms, RoomScanner } from './services/capture';
+import { captureCapabilities, enhanceRoom, scanRooms, RoomScanner } from './services/capture';
 import FloorPlan from './components/FloorPlan';
 import Inspector from './components/Inspector';
 import Dialog from './components/Dialog';
 import { NoticeContext } from './components/NoticeContext';
 const RoomViewer = lazy(() => import('./components/RoomViewer'));
+type ViewMode = import('./components/RoomViewer').ViewMode;
+type Display = import('./components/RoomViewer').Display;
 type Modal = 'new' | 'scan' | 'export' | 'settings' | 'rename' | null;
 
 export default function App() {
   const [room, setRoom] = useState<Room>(sampleRoom), [rooms, setRooms] = useState<Room[]>([]), [selected, setSelected] = useState('wall-1');
   const [dirty, setDirty] = useState(false), [loading, setLoading] = useState(true), [busy, setBusy] = useState(false), [history, setHistory] = useState<Room[]>([]);
-  const [view, setView] = useState<'3d' | 'plan'>('3d'), [furniture, setFurniture] = useState(true), [cutaway, setCutaway] = useState(true), [ceiling, setCeiling] = useState(true), [resetKey, setResetKey] = useState(0);
-  const [modal, setModal] = useState<Modal>(null), [notice, setNotice] = useState<{ text: string; error?: boolean } | null>(null), [navOpen, setNavOpen] = useState(false);
+  const [view, setView] = useState<'3d' | 'plan'>('3d'), [furniture, setFurniture] = useState(true), [cutaway, setCutaway] = useState(true), [ceiling, setCeiling] = useState(true), [camera, setCamera] = useState<ViewMode>('orbit'), [viewKey, setViewKey] = useState(0), [focusKey, setFocusKey] = useState(0), [fixtures, setFixtures] = useState(true), [display, setDisplay] = useState<Display>('model'), [labels, setLabels] = useState(false), [measure, setMeasure] = useState(false), [full, setFull] = useState(false), [resetKey, setResetKey] = useState(0);
+  const [modal, setModal] = useState<Modal>(null), [notice, setNotice] = useState<{ text: string; error?: boolean; busy?: boolean } | null>(null), [navOpen, setNavOpen] = useState(false);
   const [capability, setCapability] = useState<Awaited<ReturnType<typeof captureCapabilities>> | null>(null);
-  const [server, setServer] = useState(import.meta.env.VITE_API_URL ?? ''), [token, setToken] = useState('');
+  const [server, setServer] = useState(import.meta.env.VITE_API_URL ?? ''), [token, setToken] = useState(import.meta.env.VITE_API_TOKEN ?? '');
   const fileInput = useRef<HTMLInputElement>(null);
   useEffect(() => {
     let active = true;
@@ -26,7 +28,8 @@ export default function App() {
     captureCapabilities().then(c => { if (active) setCapability(c); });
     return () => { active = false; };
   }, []);
-  useEffect(() => { if (!notice || notice.error) return; const timer = setTimeout(() => setNotice(null), 4500); return () => clearTimeout(timer); }, [notice]);
+  useEffect(() => { if (!full) return; const leave = (e: KeyboardEvent) => { if (e.key === 'Escape') setFull(false); }; window.addEventListener('keydown', leave); return () => window.removeEventListener('keydown', leave); }, [full]);
+  useEffect(() => { if (!notice || notice.error || notice.busy) return; const timer = setTimeout(() => setNotice(null), 4500); return () => clearTimeout(timer); }, [notice]);
   useEffect(() => { const handler = (e: BeforeUnloadEvent) => { if (dirty) e.preventDefault(); }; window.addEventListener('beforeunload', handler); return () => window.removeEventListener('beforeunload', handler); }, [dirty]);
   const error = (message: string) => setNotice({ text: message, error: true });
   const change = (next: Room) => {
@@ -39,16 +42,45 @@ export default function App() {
   const undo = useCallback(() => { if (history.length) { setRoom(history.at(-1)!); setHistory(h => h.slice(0, -1)); setDirty(true); } }, [history]);
   useEffect(() => { const handler = (e: KeyboardEvent) => { const input = e.target instanceof HTMLElement && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName); if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); if (!busy && !loading) void save(); } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !input && !modal && !busy && !loading) { e.preventDefault(); undo(); } }; window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler); }, [save, undo, busy, loading, modal]);
   const canLeave = () => !dirty || window.confirm('You have unsaved changes. Continue without saving them?');
-  const activate = (next: Room) => { setRoom(next); setSelected(next.walls[0].id); setHistory([]); setDirty(false); setNavOpen(false); };
+  const activate = (next: Room) => { setRoom(next); setSelected(next.walls[0].id); setHistory([]); setDirty(false); setNavOpen(false); setCamera('orbit'); setMeasure(false); };
+  // Items a person should look at before trusting them, and the card that walks through them one at a time.
+  const toCheck = needsCheck(room), info = describeElement(room, selected), flagged = toCheck.includes(selected);
+  const lookAt = (id: string) => { setView('3d'); setSelected(id); setFocusKey(k => k + 1); };
+  const nextCheck = () => { if (toCheck.length) lookAt(toCheck[(toCheck.indexOf(selected) + 1) % toCheck.length]); };
+  const settle = (keep: boolean) => {
+    const rest = toCheck.filter(id => id !== selected), following = rest.length ? rest[toCheck.indexOf(selected) % rest.length] : room.walls[0].id;
+    if (!change(keep ? confirmElement(room, selected) : removeElement(room, selected))) return;
+    if (rest.length) lookAt(following); else setSelected(following);
+  };
+  // The on-screen walk pad reuses the keyboard path so there is one walking rule.
+  const hold = useRef(0);
+  const walkStart = (key: string) => { const step = () => window.dispatchEvent(new KeyboardEvent('keydown', { key })); step(); window.clearInterval(hold.current); hold.current = window.setInterval(step, 110); };
+  const walkStop = () => window.clearInterval(hold.current);
+  // After a scan, the server adds what the phone cannot work out alone: the measured ceiling and fixtures found on photos.
+  const enhance = async (scanned: Room[], sources: unknown[]) => {
+    for (const [index, original] of scanned.entries()) {
+      const label = scanned.length > 1 ? ` (room ${index + 1} of ${scanned.length})` : '';
+      try {
+        setNotice({ text: `Sending scan to the server${label}…`, busy: true });
+        const result = await enhanceRoom(original, sources[index], server, token, stage => setNotice({ text: `${stage}${label}…`, busy: true }));
+        await saveRoom(result.room); setRooms(await listRooms());
+        // Only swap the room on screen if the user is still looking at this one and has not started editing it.
+        setRoom(current => current.id === result.room.id && current.updatedAt === original.updatedAt ? result.room : current);
+        const found = [result.room.ceiling ? 'ceiling measured' : '', result.room.fixtures?.length ? `${result.room.fixtures.length} wall fixture(s)` : '', result.room.ceiling?.items?.length ? `${result.room.ceiling.items.length} ceiling item(s)` : ''].filter(Boolean).join(', ');
+        setNotice({ text: `${original.name}: ${found || 'nothing new found'}. ${result.notes.filter(note => /not /i.test(note)).join(' ')}`.trim() });
+      } catch (e) { error(`${original.name}: could not process on the server. ${e instanceof Error ? e.message : ''} The scanned room is saved without ceiling or fixtures.`); }
+    }
+  };
   const create = async (data: FormData, scan = false) => {
     if (!canLeave()) return;
     setBusy(true);
     try {
       const name = String(data.get('name')).trim() || 'Untitled room', height = Number(data.get('height'));
-      const made = scan ? await scanRooms(name, height) : { rooms: [newRoom(name, Number(data.get('width')), Number(data.get('depth')), height)], skipped: 0 };
+      const made = scan ? await scanRooms(name, height) : { rooms: [newRoom(name, Number(data.get('width')), Number(data.get('depth')), height)], skipped: 0, sources: [] };
       for (const room of made.rooms) await saveRoom(room);
       const captured = `${made.rooms.length > 1 ? `${made.rooms.length} rooms captured` : 'Capture saved'}. Review the dimensions before using them.${made.skipped ? ` ${made.skipped} room${made.skipped > 1 ? 's' : ''} could not be read and ${made.skipped > 1 ? 'were' : 'was'} skipped.` : ''}`;
       setRooms(await listRooms()); activate(made.rooms[0]); setModal(null); setNotice({ text: scan ? captured : 'New room created.' });
+      if (scan && server && made.sources.length) void enhance(made.rooms, made.sources);
     } catch (e) { const message = e instanceof Error ? e.message : 'Capture failed.'; if (!/cancel/i.test(message)) error(message); }
     finally { setBusy(false); }
   };
@@ -95,11 +127,22 @@ export default function App() {
       <header className="topbar"><div className="breadcrumb"><button className="icon-button mobile-menu" aria-label="Open navigation" onClick={() => setNavOpen(true)}><Menu size={20} /></button><span>My rooms</span><ChevronRight size={14} /><strong>{room.name}</strong></div><div className="top-actions"><span className={`save-status ${dirty ? 'unsaved' : ''}`}>{dirty ? <span className="status-dot" /> : <Check size={13} />}{dirty ? 'Unsaved changes' : room.source === 'sample' && !rooms.some(r => r.id === room.id) ? 'Sample room' : 'Saved locally'}</span><button className="button secondary" onClick={() => void save()} disabled={busy || loading}><Save size={15} /><span>Save</span></button><button className="button dark" onClick={() => setModal('export')} disabled={busy || loading}><Download size={16} />Export</button></div></header>
       <section className="room-heading"><div><div className="eyebrow">ROOM STUDIO <span> / </span> {room.source === 'sample' ? 'EXPLORE THE EDITOR' : room.source === 'manual' ? 'MANUAL LAYOUT' : 'CAPTURE REVIEW'}</div><button className="room-title" disabled={busy || loading} onClick={() => setModal('rename')} title="Rename room"><h1>{room.name}</h1><ArrowUpRight size={21} /></button><p>{room.source === 'sample' ? 'An example space to make your own. Start a scan or create a room.' : 'Review your space. Refine the details. Keep every dimension.'}</p></div><div className="room-metrics"><div><span>FLOOR AREA</span><strong>{room.floor.length ? floorArea(room).toFixed(2) : '—'}<small>m²</small></strong></div><div><span>PERIMETER</span><strong>{perimeter(room).toFixed(2)}<small>m</small></strong></div><div><span>WALLS</span><strong>{room.walls.length.toString().padStart(2, '0')}</strong></div></div></section>
       <div className="studio" inert={busy || loading}><section className="viewer-panel"><div className="viewer-toolbar"><div className="tabs"><button className={view === '3d' ? 'active' : ''} onClick={() => setView('3d')}><Box size={15} />3D model</button><button className={view === 'plan' ? 'active' : ''} onClick={() => setView('plan')}><Layers2 size={15} />Floorplan</button></div><div className="view-actions"><button className="icon-button" onClick={undo} aria-label="Undo last edit" title="Undo" disabled={!history.length}><Undo2 size={17} /></button><button className="icon-button" onClick={() => setResetKey(v => v + 1)} aria-label="Reset camera" title="Reset camera"><RotateCcw size={17} /></button></div></div>
-        <div className="viewport">{view === '3d' ? <Suspense fallback={<div className="viewer-loading"><LoaderCircle className="spin" />Preparing your room…</div>}><RoomViewer room={room} furniture={furniture} cutaway={cutaway} ceiling={ceiling} selected={selected} onSelect={setSelected} resetKey={resetKey} /></Suspense> : <FloorPlan room={furniture ? room : { ...room, objects: [] }} selected={selected} onSelect={setSelected} />}
+        <div className={`viewport${full ? ' full' : ''}`}>{view === '3d' ? <Suspense fallback={<div className="viewer-loading"><LoaderCircle className="spin" />Preparing your room…</div>}><RoomViewer room={room} furniture={furniture} cutaway={cutaway} ceiling={ceiling && camera !== 'top'} selected={selected} onSelect={setSelected} resetKey={resetKey} view={camera} viewKey={viewKey} display={display} focusKey={focusKey} labels={labels} measure={measure} fixtures={fixtures} /></Suspense> : <FloorPlan room={{ ...room, objects: furniture ? room.objects : [], fixtures: fixtures ? room.fixtures : [], ceiling: room.ceiling && { ...room.ceiling, items: fixtures ? room.ceiling.items : [] } }} selected={selected} onSelect={setSelected} />}
           <div className="viewport-tag"><span className="status-dot" />{room.source === 'sample' ? 'SAMPLE · NOT A SCAN' : room.source === 'manual' ? 'MANUAL ROOM' : room.source === 'arcore-depth' ? 'EXPERIMENTAL DEPTH LAYOUT' : 'CAPTURED ROOM'}</div>
-          <div className="viewport-controls"><button className={furniture ? 'enabled' : ''} aria-pressed={furniture} onClick={() => setFurniture(v => !v)}><Sofa size={16} />Furniture</button>{view === '3d' ? <button className={cutaway ? 'enabled' : ''} aria-pressed={cutaway} onClick={() => setCutaway(v => !v)}><Eye size={16} />Cutaway</button> : null}{view === '3d' ? <button className={ceiling ? 'enabled' : ''} aria-pressed={ceiling} onClick={() => setCeiling(v => !v)}><PanelTop size={16} />Ceiling</button> : null}</div>
+          <div className="viewport-controls">{view === '3d' ? <span className="display-switch" role="group" aria-label="What to show">{([['model', 'Model'], ['lidar', 'LiDAR scan']] as const).map(([id, name]) => <button key={id} className={display === id ? 'enabled' : ''} aria-pressed={display === id} onClick={() => setDisplay(id)}>{name}</button>)}</span> : null}<button className={furniture ? 'enabled' : ''} aria-pressed={furniture} onClick={() => setFurniture(v => !v)}><Sofa size={16} />Furniture</button><button className={fixtures ? 'enabled' : ''} aria-pressed={fixtures} onClick={() => setFixtures(v => !v)}><Plug size={16} />Fixtures</button>{view === '3d' ? <button className={cutaway ? 'enabled' : ''} aria-pressed={cutaway} onClick={() => setCutaway(v => !v)}><Eye size={16} />Cutaway</button> : null}{view === '3d' ? <button className={ceiling ? 'enabled' : ''} aria-pressed={ceiling} onClick={() => setCeiling(v => !v)}><PanelTop size={16} />Ceiling</button> : null}</div>
+          {view === '3d' ? <div className="viewport-views" role="group" aria-label="Camera view">{([['orbit', 'Orbit'], ['top', 'Top'], ['inside', 'Walk in']] as const).map(([id, name]) => <button key={id} className={camera === id ? 'enabled' : ''} aria-pressed={camera === id} onClick={() => { setCamera(id); setViewKey(k => k + 1); }}>{name}</button>)}</div> : null}
+          <div className="viewport-tools">{view === '3d' ? <><button title="Look at the selected item" aria-label="Look at the selected item" onClick={() => setFocusKey(k => k + 1)}><Crosshair size={16} /></button>
+            <button title="Measure between two points" aria-label="Measure between two points" className={measure ? 'enabled' : ''} aria-pressed={measure} onClick={() => setMeasure(v => !v)}><Ruler size={16} /></button>
+            <button title="Show wall lengths" aria-label="Show wall lengths" className={labels ? 'enabled' : ''} aria-pressed={labels} onClick={() => setLabels(v => !v)}><Tag size={16} /></button></> : null}
+            {toCheck.length ? <button title={`Go through ${toCheck.length} item${toCheck.length > 1 ? 's' : ''} that need a check`} aria-label="Go through the items that need a check" className="with-count" onClick={nextCheck}><ListChecks size={16} /><b>{toCheck.length}</b></button> : null}
+            <button title={full ? 'Exit full screen' : 'Full screen'} aria-label={full ? 'Exit full screen' : 'Full screen'} onClick={() => setFull(v => !v)}>{full ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button></div>
+          {info ? <div className={`viewport-card${flagged ? ' flagged' : ''}`}><strong>{info}</strong>
+            {flagged ? <><span>Not confirmed yet{toCheck.length > 1 ? ` · ${toCheck.indexOf(selected) + 1} of ${toCheck.length}` : ''}. Is it really there, and in the right place?</span>
+              <div><button className="yes" onClick={() => settle(true)}><CircleCheck size={14} />Correct</button><button className="no" onClick={() => settle(false)}><Trash2 size={14} />Remove</button>{toCheck.length > 1 ? <button onClick={nextCheck}>Skip</button> : null}</div></>
+              : toCheck.length ? <div><button onClick={nextCheck}><ListChecks size={14} />Check {toCheck.length} unconfirmed item{toCheck.length > 1 ? 's' : ''}</button></div> : null}</div> : null}
+          {view === '3d' && camera === 'inside' ? <div className="walk-pad" aria-label="Walk">{([['ArrowUp', ArrowUp, 'forward'], ['ArrowLeft', ArrowLeft, 'left'], ['ArrowDown', ArrowDown, 'back'], ['ArrowRight', ArrowRight, 'right']] as const).map(([key, Icon, name]) => <button key={key} className={name} aria-label={`Walk ${name}`} onPointerDown={() => walkStart(key)} onPointerUp={walkStop} onPointerLeave={walkStop} onPointerCancel={walkStop}><Icon size={18} /></button>)}</div> : null}
           <div className="orientation" title="Model axis, not compass north"><span>−Z</span><div>↑</div></div>
-        </div><div className="viewer-footer"><span><span className="status-dot" />{view === '3d' ? 'Drag to orbit · Scroll to zoom' : 'Select a wall to inspect dimensions'}</span><span>1 unit = 1 meter</span></div>
+        </div><div className="viewer-footer"><span><span className="status-dot" />{view === '3d' ? '' + (measure ? 'Click two points to measure the distance between them' : camera === 'inside' ? 'Drag to look around · Arrow keys or double-click the floor to walk · Scroll to zoom the lens' : 'Drag to orbit · Scroll to zoom · Right-drag or two fingers to pan · Double-click to move in') : 'Select a wall to inspect dimensions'}</span><span>1 unit = 1 meter</span></div>
         <div className="review-note"><Ruler size={18} /><div><strong>{room.source === 'sample' ? 'A starting point, not a measurement' : 'A quick check goes a long way'}</strong><p>{room.warnings[0] ?? (room.source === 'sample' ? 'This sample lets you try editing and exporting before your first scan.' : 'Verify critical dimensions with a reference measurement before installation.')}</p></div></div>
       </section><Inspector room={room} selected={selected} onSelect={setSelected} onChange={change} onError={error} /></div>
       {room.warnings.length > 1 ? <details className="scan-warnings"><summary>{room.warnings.length} scan review notes</summary><ul>{room.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul></details> : null}

@@ -1,4 +1,4 @@
-import { bounds, wallLength, type Room } from '../domain/room';
+import { bounds, fixtureLabel, wallLength, type Room } from '../domain/room';
 export default function FloorPlan({ room, selected = '', onSelect }: { room: Room; selected?: string; onSelect?: (id: string) => void }) {
   const b = bounds(room), margin = 0.9, width = b.width + margin * 2, height = b.depth + margin * 2;
   return <svg className="floorplan" viewBox={`${b.minX - margin} ${b.minZ - margin} ${width} ${height}`} role="img" aria-label="Measured room floorplan">
@@ -20,7 +20,11 @@ export default function FloorPlan({ room, selected = '', onSelect }: { room: Roo
     {(room.fixtures ?? []).map(f => { const w = room.walls.find(w => w.id === f.wallId)!; const length = wallLength(w), dx = (w.end.x - w.start.x) / length, dz = (w.end.z - w.start.z) / length, along = f.offset + f.width / 2;
       // Nudge the marker onto the room side of the wall line.
       const side = room.source === 'roomplan' || ((b.minX + b.maxX) / 2 - w.start.x) * -dz + ((b.minZ + b.maxZ) / 2 - w.start.z) * dx >= 0 ? 1 : -1, out = w.thickness / 2 + 0.06;
-      return <g key={f.id} className={onSelect ? 'plan-wall' : ''} onClick={() => onSelect?.(f.id)}><title>{`${f.kind.replace('_', ' ')}, ${(f.sill + f.height / 2).toFixed(2)} m above floor`}</title><rect x={-Math.max(0.1, f.width) / 2} y={-0.045} width={Math.max(0.1, f.width)} height={0.09} rx=".02" transform={`translate(${w.start.x + dx * along - dz * side * out},${w.start.z + dz * along + dx * side * out}) rotate(${Math.atan2(dz, dx) * 180 / Math.PI})`} fill={selected === f.id ? '#648246' : '#e07b39'} stroke="#f3f3ed" strokeWidth=".012" /></g>; })}
+      return <g key={f.id} className={onSelect ? 'plan-wall' : ''} onClick={() => onSelect?.(f.id)}><title>{`${fixtureLabel(f.kind)}, ${(f.sill + f.height / 2).toFixed(2)} m above floor`}</title><rect x={-Math.max(0.1, f.width) / 2} y={-0.045} width={Math.max(0.1, f.width)} height={0.09} rx=".02" transform={`translate(${w.start.x + dx * along - dz * side * out},${w.start.z + dz * along + dx * side * out}) rotate(${Math.atan2(dz, dx) * 180 / Math.PI})`} fill={selected === f.id ? '#648246' : f.kind === 'light' ? '#e2b53c' : f.kind === 'hole' ? '#26272b' : f.kind === 'ac_unit' ? '#5d8fb5' : '#e07b39'} stroke="#f3f3ed" strokeWidth=".012" /></g>; })}
+    {/* Ceiling items, as on a reflected ceiling plan: lights are crossed circles, holes are dark squares. */}
+    {(room.ceiling?.items ?? []).map(i => <g key={i.id} className={onSelect ? 'plan-wall' : ''} onClick={() => onSelect?.(i.id)} transform={`translate(${i.x},${i.z}) rotate(${i.rotation * 180 / Math.PI})`}><title>{`${fixtureLabel(i.kind)} on the ceiling at ${i.height.toFixed(2)} m`}</title>
+      {i.kind === 'light' && Math.max(i.width, i.depth) < 0.3 ? <><circle r={Math.max(0.07, i.width / 2)} fill="#ffe9a8" stroke={selected === i.id ? '#648246' : '#b8891f'} strokeWidth=".02" /><path d="M -.05 -.05 L .05 .05 M -.05 .05 L .05 -.05" stroke="#b8891f" strokeWidth=".015" /></>
+        : <rect x={-Math.max(0.08, i.width) / 2} y={-Math.max(0.08, i.depth) / 2} width={Math.max(0.08, i.width)} height={Math.max(0.08, i.depth)} rx=".01" fill={i.kind === 'hole' ? '#26272b' : i.kind === 'light' ? '#ffe9a8' : '#9a9d98'} stroke={selected === i.id ? '#648246' : '#6b6f68'} strokeWidth=".02" />}</g>)}
     {room.floor.map((p, i) => <g key={i}><circle cx={p.x} cy={p.z} r=".07" fill="#f6f8ee" stroke="#424c42" strokeWidth=".025" /><text x={p.x + 0.15} y={p.z + 0.22} fontSize=".12" fill="#657060">{i + 1}</text></g>)}
   </svg>;
 }

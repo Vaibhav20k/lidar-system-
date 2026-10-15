@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { wallLength, type Room } from '../domain/room';
 
-export function buildRoomGroup(room: Room, options: { furniture?: boolean; selected?: string; ceiling?: boolean; markers?: boolean } = {}) {
+export function buildRoomGroup(room: Room, options: { furniture?: boolean; selected?: string; ceiling?: boolean; markers?: boolean; fixtures?: boolean } = {}) {
   const root = new THREE.Group(); root.name = room.name;
   const material = (color: string, opacity = 1) => new THREE.MeshStandardMaterial({ color, roughness: 0.82, metalness: 0, side: THREE.DoubleSide, transparent: opacity < 1, opacity });
   const box = (size: [number, number, number], position: [number, number, number], mat: THREE.Material, parent: THREE.Group, id: string) => {
@@ -36,6 +36,17 @@ export function buildRoomGroup(room: Room, options: { furniture?: boolean; selec
       const rest = new THREE.Shape(flat(room.floor));
       for (const region of regions) rest.holes.push(new THREE.Path(flat(region.points)));
       hang(rest, main);
+      // Lights hang just below the surface they are fixed to; holes are dark patches flush with it.
+      for (const item of options.fixtures === false ? [] : room.ceiling?.items ?? []) {
+        const holder = new THREE.Group(); holder.position.set(item.x, item.height, item.z); holder.rotation.y = -item.rotation; holder.userData.elementId = item.id;
+        const tone = options.selected === item.id ? '#9cc070' : item.kind === 'light' ? '#ffe9a8' : item.kind === 'hole' ? '#26272b' : '#9a9d98';
+        if (item.kind === 'light' && Math.max(item.width, item.depth) < 0.3) {
+          const lamp = new THREE.Mesh(new THREE.CylinderGeometry(Math.max(item.width, item.depth) / 2, Math.max(item.width, item.depth) / 2, 0.1, 20), material(tone));
+          lamp.position.y = -0.05; lamp.userData.elementId = item.id; holder.add(lamp);
+        } else box([item.width, item.kind === 'hole' ? 0.012 : 0.05, item.depth], [0, item.kind === 'hole' ? -0.006 : -0.025, 0], material(tone), holder, item.id);
+        if (options.markers) box([item.width + 0.08, 0.006, item.depth + 0.08], [0, -0.003, 0], material(item.review ? '#d9a521' : '#e07b39'), holder, item.id);
+        root.add(holder);
+      }
     }
   }
   const center = { x: room.walls.reduce((sum, w) => sum + w.start.x + w.end.x, 0) / (room.walls.length * 2), z: room.walls.reduce((sum, w) => sum + w.start.z + w.end.z, 0) / (room.walls.length * 2) };
@@ -64,14 +75,24 @@ export function buildRoomGroup(room: Room, options: { furniture?: boolean; selec
     // Local +Z points to (-dz, dx) in the world; plates go on whichever wall face looks into the room.
     // Scanned walls already run so that this side faces the room; a centre test would pick the back of short jog walls in L-shaped rooms.
     const inside = room.source === 'roomplan' || (center.x - wall.start.x) * -dz + (center.z - wall.start.z) * dx >= 0 ? 1 : -1;
-    for (const fixture of (room.fixtures ?? []).filter(f => f.wallId === wall.id)) {
+    for (const fixture of options.fixtures === false ? [] : (room.fixtures ?? []).filter(f => f.wallId === wall.id)) {
       const picked = options.selected === fixture.id, face = inside * (wall.thickness / 2 + 0.006);
       const at = (x: number, y: number, out: number): [number, number, number] => [fixture.offset + fixture.width / 2 + x, fixture.sill + fixture.height / 2 + y, face + inside * out];
       // The coloured surround is an on-screen marker so small plates stay findable; exports leave it out.
-      if (options.markers) box([fixture.width + 0.05, fixture.height + 0.05, 0.012], at(0, 0, 0), material(picked ? '#9cc070' : '#e07b39'), group, fixture.id);
-      box([fixture.width, fixture.height, 0.02], at(0, 0, 0.008), material('#f7f5ee'), group, fixture.id);
-      const sockets = fixture.kind === 'socket', count = Math.max(1, Math.min(6, Math.round(fixture.width / 0.07)));
-      if (fixture.kind !== 'other_electrical' && fixture.kind !== 'distribution_box') for (let i = 0; i < count; i++) box([fixture.width / count * 0.5, fixture.height * (sockets ? 0.35 : 0.5), 0.008], at((i + 0.5) * fixture.width / count - fixture.width / 2, 0, 0.02), material(sockets ? '#4a4f55' : '#d8d4c8'), group, fixture.id);
+      const lit = material('#ffe9a8'), dark = material('#26272b');
+      if (options.markers) box([fixture.width + 0.05, fixture.height + 0.05, 0.012], at(0, 0, 0), material(picked ? '#9cc070' : fixture.review ? '#d9a521' : '#e07b39'), group, fixture.id);
+      if (fixture.kind === 'ac_unit') {
+        // A split AC is a box standing out from the wall, with a darker outlet slot along the bottom.
+        const proud = fixture.depth ?? 0.2;
+        box([fixture.width, fixture.height, proud], at(0, 0, proud / 2), material('#f4f4f0'), group, fixture.id);
+        box([fixture.width * 0.86, fixture.height * 0.12, 0.012], at(0, -fixture.height * 0.3, proud + 0.004), material('#b9bcc0'), group, fixture.id);
+      } else if (fixture.kind === 'hole') box([fixture.width, fixture.height, 0.012], at(0, 0, 0.004), dark, group, fixture.id);
+      else if (fixture.kind === 'light') box([fixture.width, fixture.height, 0.05], at(0, 0, 0.025), lit, group, fixture.id);
+      else {
+        box([fixture.width, fixture.height, 0.02], at(0, 0, 0.008), material('#f7f5ee'), group, fixture.id);
+        const sockets = fixture.kind === 'socket', count = Math.max(1, Math.min(6, Math.round(fixture.width / 0.07)));
+        if (fixture.kind !== 'other_electrical' && fixture.kind !== 'distribution_box' && fixture.kind !== 'junction_box') for (let i = 0; i < count; i++) box([fixture.width / count * 0.5, fixture.height * (sockets ? 0.35 : 0.5), 0.008], at((i + 0.5) * fixture.width / count - fixture.width / 2, 0, 0.02), material(sockets ? '#4a4f55' : '#d8d4c8'), group, fixture.id);
+      }
     }
     root.add(group);
   }

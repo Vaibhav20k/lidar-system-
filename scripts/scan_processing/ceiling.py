@@ -26,14 +26,18 @@ MIN_LEVEL_AREA = 0.15 # square meters a height must cover to count as its own le
 MIN_REGION_AREA = 0.12
 TRACE = 4             # outlines are traced on a grid this many times finer so edges land on cell borders
 FILL_REACH = 0.15     # unseen cells this close to a measured cell copy its level; enough to close gaps, not to grow regions
+FACING_SIDE = 0.3     # world-space normal Y within this of 0 counts as a vertical face (a beam's side)
+MAX_GROW = 0.12       # how far a lower region's edge may be pushed out to reach its measured side face
+FACE_SPAN = 0.25      # side-face points are pooled along this much of the edge before looking for the face
+FACE_MIN = 3.0        # pooled points per fine cell needed to call it a face
 
 
 def ceiling_points(capture, raw: Path, floor_y):
-    """World-space points on downward-facing surfaces above head height."""
+    """World-space points above head height: on downward-facing surfaces, and on vertical faces (beam sides)."""
     manifest = json.loads((raw / 'manifest.json').read_text())
     dw, dh = manifest['depthSize']
     u, v = np.meshgrid(np.arange(dw) + 0.5, np.arange(dh) + 0.5)
-    chunks = []
+    chunks, sides = [], []
     for line in (raw / 'frames.jsonl').read_text().splitlines():
         if not line.strip():
             continue
@@ -52,9 +56,11 @@ def ceiling_points(capture, raw: Path, floor_y):
         pose = matrix(f['cameraToWorld'])
         world = camera @ pose[:3, :3].T + pose[:3, 3]
         world_normal_y = normal @ pose[1, :3]
-        keep = (confidence >= 1) & (depth > 0.3) & (depth < 5) & (world[..., 1] - floor_y > MIN_HEIGHT) & (world_normal_y < FACING_DOWN)
-        chunks.append(world[keep])
-    return np.concatenate(chunks) if chunks else np.zeros((0, 3))
+        usable = (depth > 0.3) & (depth < 5) & (world[..., 1] - floor_y > MIN_HEIGHT)
+        chunks.append(world[usable & (confidence >= 1) & (world_normal_y < FACING_DOWN)])
+        sides.append(world[usable & (confidence >= 2) & (np.abs(world_normal_y) < FACING_SIDE)])
+    empty = np.zeros((0, 3))
+    return (np.concatenate(chunks) if chunks else empty), (np.concatenate(sides) if sides else empty)
 
 
 def main():
@@ -88,7 +94,7 @@ def main():
     cv2.fillPoly(inside, [np.round((floor - origin) / CELL - 0.5).astype(np.int32)], 1)
     inside = inside.astype(bool)
 
-    points = ceiling_points(capture, raw, floor_y)
+    points, side_points = ceiling_points(capture, raw, floor_y)
     a, b = to_room(points[:, 0], points[:, 2])
     ix, iz = ((a - origin[0]) / CELL).astype(int), ((b - origin[1]) / CELL).astype(int)
     ok = (ix >= 0) & (ix < cols) & (iz >= 0) & (iz < rows)
@@ -148,6 +154,40 @@ def main():
         # A traced pixel centre sits half a fine pixel inside the region's edge.
         return [dict(zip(('x', 'z'), (round(float(c), 3) for c in to_world(*((point[0] + 0.5) / TRACE * CELL + origin))))) for point in approx]
 
+    # Vertical-face points on the fine grid, to place the edges of regions hanging below the ceiling.
+    sa, sb = to_room(side_points[:, 0], side_points[:, 2])
+    sx, sz = ((sa - origin[0]) / CELL * TRACE).astype(int), ((sb - origin[1]) / CELL * TRACE).astype(int)
+    on_grid = (sx >= 0) & (sx < cols * TRACE) & (sz >= 0) & (sz < rows * TRACE)
+    sx, sz, side_heights = sx[on_grid], sz[on_grid], side_points[on_grid, 1] - floor_y
+
+    def reach_side_face(fine, low):
+        """Push a lower region's edges out to its measured side face.
+
+        Each grid cell takes the highest surface seen in it, so cells on a beam's edge count as ceiling and the beam
+        comes out several cm narrow. Look outward from each edge, along the grid, for the beam's side face (vertical
+        points between the beam's underside and the ceiling) within MAX_GROW, and take everything up to where those
+        points are densest. Edges with no measured face are left where they are."""
+        band = (side_heights > low + 0.05) & (side_heights < levels[main] - 0.05)
+        count = np.zeros(fine.shape, np.float32)
+        np.add.at(count, (sz[band], sx[band]), 1)
+        grown = fine.astype(bool).copy()
+        steps = int(round(MAX_GROW / CELL * TRACE))
+        span = int(round(FACE_SPAN / CELL * TRACE)) | 1
+        for axis in (0, 1):
+            # Pool face points along the edge, so a hanging lamp or a stray reading cannot pass for the face.
+            pooled = cv2.blur(count, (span, 1) if axis == 0 else (1, span))  # kernel is (width, height): along the edge
+            for direction in (1, -1):
+                shift = lambda grid, n: np.roll(grid, -direction * n, axis=axis)
+                edge = fine.astype(bool) & ~shift(fine, 1).astype(bool)
+                # The face is where the pooled count peaks within reach of the edge.
+                profile = np.stack([shift(pooled, n) for n in range(1, steps + 1)])
+                best, strength = profile.argmax(axis=0) + 1, profile.max(axis=0)
+                hit = edge & (strength >= FACE_MIN)
+                for n in range(1, steps + 1):
+                    grown |= np.roll(hit & (best >= n), direction * n, axis=axis)
+        fine_inside = cv2.resize(inside.astype(np.uint8), None, fx=TRACE, fy=TRACE, interpolation=cv2.INTER_NEAREST).astype(bool)
+        return (grown.astype(bool) & fine_inside).astype(np.uint8)
+
     regions = []
     for index in range(len(levels)):
         if index == main:
@@ -155,6 +195,8 @@ def main():
         # A 3x3 opening removes specks up to 10 cm wide without shifting the mask (an even kernel would).
         mask = cv2.morphologyEx((filled == index).astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
         fine = cv2.resize(mask, None, fx=TRACE, fy=TRACE, interpolation=cv2.INTER_NEAREST)
+        if levels[index] < levels[main]:
+            fine = reach_side_face(fine, levels[index])
         contours, hierarchy = cv2.findContours(fine, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
         area = lambda contour: cv2.contourArea(contour) * (CELL / TRACE) ** 2
         for i, contour in enumerate(contours):

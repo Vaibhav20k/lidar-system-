@@ -63,6 +63,15 @@ class Wall:
         # from the room's centre instead picks the back of short jog walls in L-shaped rooms.
         self.flipped = False
 
+    @classmethod
+    def plane(cls, name, origin, axis_x, inward, width, height):
+        """Any flat rectangle, e.g. a ceiling seen from below. axis_y is chosen so the view from the inward side is not mirrored."""
+        surface = cls.__new__(cls)
+        surface.id, surface.width, surface.height, surface.flipped = name, width, height, False
+        surface.origin, surface.axis_x, surface.inward = np.asarray(origin, float), np.asarray(axis_x, float), np.asarray(inward, float)
+        surface.axis_y = np.cross(surface.inward, surface.axis_x)
+        return surface
+
     def points(self, u_view, v):
         """World positions for a grid of view coordinates."""
         uu, vv = np.meshgrid(-u_view if self.flipped else u_view, v)
@@ -214,6 +223,90 @@ def render_patch(wall: Wall, frame, center, size, ppm):
     image = cv2.remap(frame['image'], px, py, cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
     image[~visible] = (40, 40, 40)
     return image if visible.mean() > 0.5 else None
+
+
+def natural_crop(surface: Wall, frame, center, size, pixels=700):
+    """The untouched camera view around one surface point, turned so the surface's up direction is up.
+
+    Straightening a photo onto a plane stretches anything that hangs down or sticks out of it; this view does not.
+    """
+    world = surface.grid(100, center, (0.02, 0.02))[0, 0]
+    ahead = surface.grid(100, (center[0], center[1] + 0.1), (0.02, 0.02))[0, 0]
+    world_to_cam = np.linalg.inv(frame['pose'])
+
+    def pixel(point):
+        pc = world_to_cam[:3, :3] @ point + world_to_cam[:3, 3]
+        return frame['cx'] + frame['fx'] * pc[0] / -pc[2], frame['cy'] - frame['fy'] * pc[1] / -pc[2], -pc[2]
+
+    x0, y0, distance = pixel(world)
+    x1, y1, _ = pixel(ahead)
+    h, w = frame['image'].shape[:2]
+    if distance < MIN_DISTANCE or not (0 <= x0 < w and 0 <= y0 < h):
+        return None
+    radius = size / 2 * frame['fx'] / distance * 1.3  # a little wider than the straightened close-up
+    turn = 90 - np.degrees(np.arctan2(-(y1 - y0), x1 - x0))
+    transform = cv2.getRotationMatrix2D((float(x0), float(y0)), float(turn), pixels / (2 * radius))
+    transform[0, 2] += pixels / 2 - x0
+    transform[1, 2] += pixels / 2 - y0
+    return cv2.warpAffine(frame['image'], transform, (pixels, pixels), flags=cv2.INTER_CUBIC, borderValue=(40, 40, 40))
+
+
+def depth_points(raw: Path, max_range=4.5):
+    """Every confident LiDAR depth sample of a scan as world-space points with surface normals facing the camera."""
+    manifest = json.loads((raw / 'manifest.json').read_text())
+    dw, dh = manifest['depthSize']
+    u, v = np.meshgrid(np.arange(dw) + 0.5, np.arange(dh) + 0.5)
+    points, normals = [], []
+    for line in (raw / 'frames.jsonl').read_text().splitlines():
+        if not line.strip():
+            continue
+        f = json.loads(line)
+        depth_file = raw / 'depth' / f"{f['frame']}.bin"
+        if not f.get('depth') or not depth_file.exists():
+            continue
+        depth = np.fromfile(depth_file, dtype='<f4').reshape(dh, dw)
+        confidence = np.fromfile(raw / 'confidence' / f"{f['frame']}.bin", dtype=np.uint8).reshape(dh, dw)
+        k = np.array(f['intrinsics'], dtype=np.float64).reshape(3, 3).T
+        scale = dw / f['imageWidth']
+        camera = np.stack([(u - k[0, 2] * scale) / (k[0, 0] * scale) * depth, -(v - k[1, 2] * scale) / (k[1, 1] * scale) * depth, -depth], axis=-1)
+        normal = np.cross(np.gradient(camera, axis=1), np.gradient(camera, axis=0))
+        normal /= np.maximum(np.linalg.norm(normal, axis=-1, keepdims=True), 1e-9)
+        normal[np.sum(normal * camera, axis=-1) > 0] *= -1
+        pose = matrix(f['cameraToWorld'])
+        keep = (confidence >= 1) & (depth > 0.3) & (depth < max_range)
+        points.append((camera @ pose[:3, :3].T + pose[:3, 3])[keep])
+        normals.append((normal @ pose[:3, :3].T)[keep])
+    return np.concatenate(points), np.concatenate(normals)
+
+
+def ceiling_surfaces(capture, room, min_area=0.4):
+    """Planes for a measured ceiling, seen from below: the main ceiling over the whole room, then each lower region.
+
+    Needs the `ceiling` that ceiling.py writes into the room. Returns (surface, height above floor) pairs.
+    """
+    walls = [(matrix(w['transform']), w) for w in capture['walls']]
+    floor_y = min(m[1, 3] - w['height'] / 2 for m, w in walls)
+    longest = max(walls, key=lambda mw: mw[1]['width'])[0]
+    axis_x = np.array([longest[0, 0], 0.0, longest[2, 0]])
+    axis_x /= np.linalg.norm(axis_x)
+    down = np.array([0.0, -1.0, 0.0])
+    axis_y = np.cross(down, axis_x)
+
+    def surface(name, outline, height):
+        corners = np.array([[p['x'], 0.0, p['z']] for p in outline])
+        a, b = corners @ axis_x, corners @ axis_y
+        center = axis_x * (a.min() + a.max()) / 2 + axis_y * (b.min() + b.max()) / 2
+        center[1] = floor_y + height
+        return Wall.plane(name, center, axis_x, down, a.max() - a.min() + 0.1, b.max() - b.min() + 0.1), height
+
+    ceiling = room['ceiling']
+    result = [surface('ceiling', room['floor'], ceiling['height'])]
+    for index, region in enumerate(ceiling.get('regions', []), start=1):
+        xs, zs = [p['x'] for p in region['points']], [p['z'] for p in region['points']]
+        area = abs(sum(xs[i] * zs[(i + 1) % len(xs)] - xs[(i + 1) % len(xs)] * zs[i] for i in range(len(xs)))) / 2
+        if area >= min_area and region['height'] < ceiling['height'] - 0.05:
+            result.append(surface(f'ceiling-region-{index}', region['points'], region['height']))
+    return result
 
 
 def load_scan(capture_path: Path, raw: Path):
