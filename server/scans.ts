@@ -37,6 +37,8 @@ export function mountScans(app: express.Express, dataDirectory: string) {
   const python = process.env.ROOMFORM_PYTHON || 'python3';
   // Looking for fixtures sends wall and ceiling photos to OpenRouter and costs money, so it must be switched on deliberately.
   const detect = process.env.ROOMFORM_DETECT === '1' && Boolean(process.env.OPENROUTER_API_KEY);
+  // Walls fitted to LiDAR replace RoomPlan's squared corners; ROOMFORM_REFIT_WALLS=0 keeps RoomPlan's walls.
+  const refitWalls = process.env.ROOMFORM_REFIT_WALLS !== '0';
   const jobs = new Map<string, Job>();
   mkdirSync(root, { recursive: true });
 
@@ -68,7 +70,7 @@ export function mountScans(app: express.Express, dataDirectory: string) {
     try { room = parseRoom(req.body?.room); } catch { res.status(400).json({ error: 'Invalid room.' }); return; }
     if (!req.body?.capture || typeof req.body.capture !== 'object') { res.status(400).json({ error: 'The capture is missing.' }); return; }
     if (jobs.get(id)?.status === 'processing') { res.status(202).json({ status: 'processing' }); return; }
-    const capture = join(folder, 'capture.json'), plain = join(folder, 'room.json'), withCeiling = join(folder, 'room-ceiling.json'), refitted = join(folder, 'room-refit.json'), full = join(folder, 'room-full.json'), found = join(folder, 'detect');
+    const capture = join(folder, 'capture.json'), plain = join(folder, 'room.json'), withCeiling = join(folder, 'room-ceiling.json'), refitted = join(folder, 'room-refit.json'), full = join(folder, 'room-full.json'), found = join(folder, 'detect'), walled = join(folder, 'room-walls.json'), levelled = join(folder, 'room-floor.json');
     writeFileSync(capture, JSON.stringify(req.body.capture)); writeFileSync(plain, JSON.stringify({ ...room, originalUsdzPath: undefined }));
     const job: Job = { status: 'processing', stage: 'Measuring the ceiling', notes: [] };
     jobs.set(id, job);
@@ -90,10 +92,20 @@ export function mountScans(app: express.Express, dataDirectory: string) {
           latest = full; job.notes.push('Fixtures found on scan photos.');
         } catch (e) { job.notes.push(`Fixtures not detected: ${e instanceof Error ? e.message : 'unknown error'}`); }
       } else job.notes.push('Fixture detection is switched off on this server.');
+      // These two change the walls and heights the steps above measured against, so they run last.
+      if (refitWalls) {
+        job.stage = 'Fitting walls and corners to the scan';
+        try { await run(python, [join(scripts, 'refit_walls.py'), capture, bundle, latest, walled]); latest = walled; job.notes.push('Walls and corners fitted to LiDAR.'); }
+        catch (e) { job.notes.push(`Walls not refitted: ${e instanceof Error ? e.message : 'unknown error'}`); }
+      }
+      job.stage = 'Measuring heights from the real floor';
+      try { await run(python, [join(scripts, 'floor_level.py'), capture, bundle, latest, levelled]); latest = levelled; job.notes.push('Heights measured from the LiDAR floor.'); }
+      catch (e) { job.notes.push(`Floor not measured: ${e instanceof Error ? e.message : 'unknown error'}`); }
       try {
         // Keep the phone's own identity and timestamps; take only what the scripts added.
         const result = parseRoom(JSON.parse(readFileSync(latest, 'utf8')));
-        job.room = parseRoom({ ...room, originalUsdzPath: undefined, objects: result.objects, ceiling: result.ceiling, fixtures: result.fixtures, updatedAt: new Date().toISOString() });
+        job.room = parseRoom({ ...room, originalUsdzPath: undefined, walls: result.walls, floor: result.floor, openings: result.openings, objects: result.objects,
+          ceiling: result.ceiling, fixtures: result.fixtures, warnings: result.warnings, updatedAt: new Date().toISOString() });
         job.status = 'done'; job.stage = 'Done';
       } catch { job.status = 'failed'; job.error = 'The processed room was not valid.'; }
     })();

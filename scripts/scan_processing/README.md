@@ -2,7 +2,9 @@
 
 Python scripts that add what RoomPlan does not report to a Roomform room file, using the raw bundle the
 iOS scanner saves beside each scan (`<id>-raw/`: JPEG keyframes, LiDAR depth, confidence, camera poses).
-They run on a Mac after copying the scan off the phone; the app does not call them yet.
+After a scan the phone uploads the bundle and the Roomform server (`server/scans.ts`) runs them in this order:
+`ceiling.py`, `refit_objects.py`, `detect.py` + `apply_fixtures.py` (only with `ROOMFORM_DETECT=1`),
+`refit_walls.py` (unless `ROOMFORM_REFIT_WALLS=0`), `floor_level.py`. They can also be run by hand.
 
 | Script | Adds | Uses a vision model |
 | --- | --- | --- |
@@ -10,6 +12,10 @@ They run on a Mac after copying the scan off the phone; the app does not call th
 | `detect.py` | Switch boards, switches and sockets, placed on their wall | Yes (OpenRouter) |
 | `apply_fixtures.py` | Writes `detect.py` results into a room file as `fixtures` | No |
 | `ceiling.py` | Ceiling height plus beams, soffits, lofts and recesses as `ceiling` | No |
+| `refit_objects.py` | Furniture box widths pulled in to the edges seen on the photos | No |
+| `refit_walls.py` | Walls fitted to LiDAR and corners where real walls meet (not forced to 90°) | No |
+| `floor_level.py` | Heights measured from the LiDAR floor; walls on a real step or platform get its level | No |
+| `cloud.py` | Coloured point cloud for the editor's LiDAR scan view | No |
 | `find_wall_units.py` | Experimental: AC-shaped boxes mounted high on walls | No |
 
 ## Setup
@@ -40,7 +46,10 @@ Import the resulting room file in the editor. `out/<name>/wallN_detected.jpg` sh
 ## Limits worth knowing
 
 - Positions are a ray-to-wall-plane intersection, so they inherit RoomPlan's wall-plane error (a few cm).
-  Nothing here has been checked against a tape measure.
+- `refit_walls.py` and `floor_level.py` must run last: the other scripts expect RoomPlan's walls and floor.
+  A wall mostly covered (whiteboards, wardrobes, panelling) keeps RoomPlan's line, and so does a shiny floor.
+  Two phones scanning the same room still disagreed on one wall's angle; this has not been checked against a
+  tape measure yet.
 - A plate hidden behind furniture or a person during the scan cannot be found.
 - Keyframes are often motion-blurred, so counts of switches and sockets inside a board are usually missing.
 - Ceiling regions are only as complete as the scan: cells the camera never looked at are assumed to be at
