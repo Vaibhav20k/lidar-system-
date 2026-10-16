@@ -45,7 +45,7 @@ BEHIND_WALL = 0.25   # depth this far past a wall plane means the view goes thro
 REVIEW_BELOW = 0.75  # confidence under this is flagged for a person to check
 
 PLATES = ['switch_board', 'socket', 'switch', 'regulator', 'distribution_box']
-KINDS = PLATES + ['light', 'hole', 'ac_unit', 'junction_box', 'other_electrical']
+KINDS = PLATES + ['light', 'hole', 'ac_unit', 'junction_box', 'other_electrical', 'water_point', 'drain']
 # Largest plausible side in meters per kind; anything bigger is a misread.
 MAX_SIDE = {'light': 1.8, 'hole': 0.8, 'ac_unit': 1.5}
 DEFAULT_MAX_SIDE = 0.5
@@ -59,8 +59,11 @@ Find every one of these that is fixed to or cut into the wall:
 - electrical plates: switch boards (a plate carrying switches, often with sockets or a fan regulator), single switches, power sockets, distribution or MCB boxes, and empty electrical boxes with no plate fitted (report those as "other_electrical");
 - lights: tube lights, wall lamps, bulb holders, spotlights;
 - holes: pipe or core-cut holes, cut-outs left for fittings, exhaust openings. Not windows, doors, ventilator grills, niches or shelves;
-- junction boxes and ceiling roses.
-Do not report picture frames, mirrors, door handles, tiles, TVs, cables, curtain rods or stains.
+- junction boxes and ceiling roses;
+- plumbing points: taps, angle valves, stop cocks, capped or open water pipe ends coming out of the wall (report as
+  "water_point"); waste or drain pipes and their openings (report as "drain").
+Do not report picture frames, mirrors, door handles, tiles, TVs, cables, curtain rods, stains, or water pipes running
+along the wall surface (only where a pipe ends or a fitting is mounted).
 
 {REPLY_FORMAT}"""
 
@@ -104,6 +107,7 @@ def api_key():
 ATTEMPTS = 3        # tries per model request before giving up
 OUTLINE_MARGIN = 0.05   # metres a ceiling candidate may sit outside its region's outline (edge fittings)
 SAME_SPOT = 0.2         # ceiling items closer than this are one item seen twice
+BLANK_SHARPNESS, BLANK_EDGES = 3.9, 0.0018   # tiles plainer than both are not sent (half of the faintest tile with a find)
 LOCAL = 0.3             # the wall around an item is measured this far either side of it
 LOCAL_POINTS = 150      # LiDAR points needed there to trust the measurement
 SWEEP_VIEWS, SWEEP_SIZE, SWEEP_PPM = 5, 0.45, 300   # photo agreement check: frames, patch edge (m), pixels per metre
@@ -190,15 +194,44 @@ def tile_starts(length):
     return [i * (length - TILE) / (count - 1) for i in range(count)]
 
 
+def touches_outline(surface, x0, y0, w, h):
+    """Whether a tile reaches the surface's own outline. A lower ceiling region is photographed over its bounding
+    box; a tile outside the region itself can only find things that are thrown away, so it is not sent."""
+    outline = getattr(surface, 'outline', None)
+    if outline is None:
+        return True
+    corners = [(x0 - surface.width / 2, surface.height / 2 - y0), (x0 + w - surface.width / 2, surface.height / 2 - y0),
+               (x0 + w - surface.width / 2, surface.height / 2 - y0 - h), (x0 - surface.width / 2, surface.height / 2 - y0 - h)]
+    tile = np.array([(surface.origin + surface.axis_x * u + surface.axis_y * v)[[0, 2]] for u, v in corners], np.float32)
+    low, high = np.minimum(tile.min(0), outline.min(0)) - 0.2, np.maximum(tile.max(0), outline.max(0)) + 0.2
+    size = tuple((((high - low) * 50).astype(int) + 1)[::-1])
+    a, b = np.zeros(size, np.uint8), np.zeros(size, np.uint8)
+    cv2.fillPoly(a, [((tile - low) * 50).astype(np.int32)], 1)
+    cv2.fillPoly(b, [((outline - low) * 50).astype(np.int32)], 1)
+    return bool((a & cv2.dilate(b, np.ones((2 * int(OUTLINE_MARGIN * 50) + 1,) * 2, np.uint8))).any())
+
+
+def plainly_blank(crop):
+    """Whether a tile is so plain that nothing could be on it. Set at half the faintest tile the model has ever
+    found something on (sharpness 7.9, edge share 0.0035 in the living room test), so only bare, even surface goes."""
+    gray = cv2.GaussianBlur(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY).astype(np.float32), (3, 3), 0)
+    sharpness = float(np.percentile(np.abs(cv2.Laplacian(gray, cv2.CV_32F)), 99.5))
+    edges = float((cv2.Canny(crop, 40, 120) > 0).mean())
+    return sharpness < BLANK_SHARPNESS and edges < BLANK_EDGES
+
+
 def propose(model, surface, image, ppm, prompt, out, tag):
     """Stage 1: candidates as (u, v, width, height, kind, confidence) in surface view meters, centre origin."""
-    candidates = []
+    candidates, skipped = [], []
     for x0 in tile_starts(surface.width):
         for y0 in tile_starts(surface.height):
             w, h = min(TILE, surface.width), min(TILE, surface.height)
             crop = image[int(y0 * ppm):int((y0 + h) * ppm), int(x0 * ppm):int((x0 + w) * ppm)]
             if crop.size == 0 or crop.reshape(-1, 3).std(axis=0).mean() < 4:
                 continue  # featureless or fully unseen tile
+            if not touches_outline(surface, x0, y0, w, h) or plainly_blank(crop):
+                skipped.append(f'{x0:.2f},{y0:.2f}')
+                continue
             crop = cv2.resize(crop, None, fx=640 * 1.6 / (TILE * ppm), fy=640 * 1.6 / (TILE * ppm), interpolation=cv2.INTER_CUBIC)
             cv2.imwrite(str(out / 'tiles' / f'{tag}_{x0:.2f}_{y0:.2f}.jpg'), crop)
             if model is None:
@@ -215,6 +248,8 @@ def propose(model, surface, image, ppm, prompt, out, tag):
                 u = x0 + (xmin + xmax) / 2 * w - surface.width / 2
                 v = surface.height / 2 - (y0 + (ymin + ymax) / 2 * h)
                 candidates.append({'u': u, 'v': v, 'width': width, 'height': height, 'kind': kind, 'confidence': confidence_of(item.get('confidence'))})
+    if skipped:
+        print(f'  {tag}: {len(skipped)} tiles not sent (outside the surface, or bare and even)')
     return merge(candidates)
 
 
@@ -313,12 +348,12 @@ def agreeing_depth(surface, frames, center):
         plane.axis_y = surface.axis_y.copy()
         return plane
     def disagreement(plane):
-        images = [render_patch(plane, frames[i], center, (SWEEP_SIZE, SWEEP_SIZE), SWEEP_PPM) for i in views]
-        images = [cv2.GaussianBlur(cv2.cvtColor(im, cv2.COLOR_BGR2GRAY).astype(np.float32), (5, 5), 0) for im in images if im is not None]
+        rendered = [r for r in (render_patch(plane, frames[i], center, (SWEEP_SIZE, SWEEP_SIZE), SWEEP_PPM, with_mask=True) for i in views) if r is not None]
+        images = [cv2.GaussianBlur(cv2.cvtColor(im, cv2.COLOR_BGR2GRAY).astype(np.float32), (5, 5), 0) for im, _ in rendered]
         if len(images) < 3:
             return None
         stack = np.stack(images)
-        valid = np.all(stack > 0, axis=0)
+        valid = np.all(np.stack([seen for _, seen in rendered]), axis=0)
         if valid.mean() < 0.6:
             return None
         # Compare edges, not brightness: frames differ in exposure.

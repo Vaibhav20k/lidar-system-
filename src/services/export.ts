@@ -6,7 +6,7 @@ import { createElement } from 'react';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { buildRoomGroup, disposeGroup } from '../scene/buildRoom';
 import FloorPlan from '../components/FloorPlan';
-import { floorArea, type Room } from '../domain/room';
+import { floorArea, pointsCsv, type Room } from '../domain/room';
 const filename = (room: Room) => room.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'room';
 export async function deliverFile(blob: Blob, name: string) {
   if (Capacitor.isNativePlatform()) {
@@ -17,6 +17,10 @@ export async function deliverFile(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob), anchor = document.createElement('a'); anchor.href = url; anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 export async function exportJson(room: Room) { await deliverFile(new Blob([JSON.stringify({ ...room, originalUsdzPath: undefined }, null, 2)], { type: 'application/json' }), `${filename(room)}.room.json`); }
+export async function exportPointsCsv(room: Room) {
+  // A byte-order mark so Excel reads the file as UTF-8.
+  await deliverFile(new Blob(['\ufeff' + pointsCsv(room)], { type: 'text/csv' }), `${filename(room)}-points.csv`);
+}
 export async function exportGlb(room: Room) {
   const group = buildRoomGroup(room);
   try { const glb = await new GLTFExporter().parseAsync(group, { binary: true }); if (!(glb instanceof ArrayBuffer)) throw new Error('Invalid GLB export.'); await deliverFile(new Blob([glb], { type: 'model/gltf-binary' }), `${filename(room)}.glb`); }

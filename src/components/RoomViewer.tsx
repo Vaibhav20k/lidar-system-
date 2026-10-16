@@ -6,6 +6,8 @@ import { buildRoomGroup, disposeGroup } from '../scene/buildRoom';
 
 export type ViewMode = 'orbit' | 'top' | 'inside';
 export type Display = 'model' | 'lidar';
+// A rectangle drawn by hand on one wall: where it starts along the wall, how high its bottom edge is, and its size.
+export type DrawnBox = { wallId: string; offset: number; sill: number; width: number; height: number };
 
 // The room as the LiDAR saw it: coloured points from scripts/scan_processing/cloud.py, split by the group each point
 // belongs to (a wall, the ceiling, or anything else) so the view can fade near walls and hide the ceiling.
@@ -30,7 +32,7 @@ function loadCloud(roomId: string) {
   }).catch(() => null));
   return clouds.get(roomId)!;
 }
-type Props = { room: Room; furniture: boolean; cutaway: boolean; ceiling: boolean; selected: string; onSelect: (id: string) => void; resetKey: number; view: ViewMode; viewKey: number; display: Display; focusKey: number; labels: boolean; measure: boolean; fixtures: boolean };
+type Props = { room: Room; furniture: boolean; cutaway: boolean; ceiling: boolean; selected: string; onSelect: (id: string) => void; resetKey: number; view: ViewMode; viewKey: number; display: Display; focusKey: number; labels: boolean; measure: boolean; fixtures: boolean; marking: boolean; onDraw: (box: DrawnBox) => void };
 const EYE = 1.55; // standing eye height for the walk-in view, meters
 
 // A small text tag that always faces the camera. `height` is its size in meters, or with `fixed` a fraction of the view
@@ -47,12 +49,13 @@ function tag(text: string, height: number, tone = '#26372c', fixed = false) {
   return { sprite, dispose: () => { texture.dispose(); sprite.material.dispose(); } };
 }
 
-export default function RoomViewer({ room, furniture, cutaway, ceiling, selected, onSelect, resetKey, view, viewKey, display, focusKey, labels, measure, fixtures }: Props) {
+export default function RoomViewer({ room, furniture, cutaway, ceiling, selected, onSelect, resetKey, view, viewKey, display, focusKey, labels, measure, fixtures, marking, onDraw }: Props) {
   const host = useRef<HTMLDivElement>(null), tip = useRef<HTMLDivElement>(null), note = useRef<HTMLDivElement>(null);
   const pose = useRef<{ roomId: string; resetKey: number; position: THREE.Vector3; target: THREE.Vector3; fov: number } | null>(null);
   const mode = useRef<ViewMode | 'free'>(view);
   const api = useRef<{ go: (next: ViewMode, animate: boolean) => void; focus: () => void } | null>(null);
   const onSelectRef = useRef(onSelect); onSelectRef.current = onSelect;
+  const onDrawRef = useRef(onDraw); onDrawRef.current = onDraw;
   const [error, setError] = useState('');
   useEffect(() => {
     if (!host.current) return;
@@ -279,9 +282,45 @@ export default function RoomViewer({ room, furniture, cutaway, ceiling, selected
     };
     let dragging = -1, dragSnap: '' | 'corner' | 'edge' = '';
 
+    // Drawing a box on a wall, for anything the scan missed: press on a wall, drag, let go. The box stays on the wall
+    // it was started on, so it can be drawn on the LiDAR scan where windows and switches show in their real colours.
+    const onWall = (clientX: number, clientY: number, only?: string) => {
+      const rect = canvas.getBoundingClientRect(); pointer.set((clientX - rect.left) / rect.width * 2 - 1, -(clientY - rect.top) / rect.height * 2 + 1); raycaster.setFromCamera(pointer, camera);
+      let best: { wall: Room['walls'][number]; along: number; up: number; distance: number } | null = null;
+      for (const wall of room.walls) {
+        if (only && wall.id !== only) continue;
+        const length = wallLength(wall); if (length < 0.05) continue;
+        const dx = (wall.end.x - wall.start.x) / length, dz = (wall.end.z - wall.start.z) / length;
+        const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(new THREE.Vector3(-dz, 0, dx), new THREE.Vector3(wall.start.x, 0, wall.start.z));
+        const at = raycaster.ray.intersectPlane(plane, new THREE.Vector3()); if (!at) continue;
+        const along = (at.x - wall.start.x) * dx + (at.z - wall.start.z) * dz, up = at.y - wall.baseY, distance = at.distanceTo(raycaster.ray.origin);
+        const inside = along >= -0.01 && along <= length + 0.01 && up >= -0.01 && up <= wall.height + 0.01;
+        if (only) return { wall, along: Math.min(length, Math.max(0, along)), up: Math.min(wall.height, Math.max(0, up)), distance };
+        if (inside && (!best || distance < best.distance)) best = { wall, along, up, distance };
+      }
+      return best;
+    };
+    const sketch = new THREE.LineLoop(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: '#d2452d', depthTest: false }));
+    sketch.visible = false; sketch.renderOrder = 12; sketch.frustumCulled = false; overlay.add(sketch); cleanup.push(() => { sketch.geometry.dispose(); (sketch.material as THREE.Material).dispose(); });
+    let drawing: { wall: Room['walls'][number]; along: number; up: number } | null = null, drawn: DrawnBox | null = null;
+    const boxFrom = (to: { along: number; up: number }): DrawnBox => {
+      const wall = drawing!.wall;
+      return { wallId: wall.id, offset: Math.min(drawing!.along, to.along), sill: Math.min(drawing!.up, to.up), width: Math.abs(to.along - drawing!.along), height: Math.abs(to.up - drawing!.up) };
+    };
+    const showBox = (box: DrawnBox) => {
+      const wall = room.walls.find(w => w.id === box.wallId)!, length = wallLength(wall), dx = (wall.end.x - wall.start.x) / length, dz = (wall.end.z - wall.start.z) / length;
+      const at = (a: number, b: number) => new THREE.Vector3(wall.start.x + dx * a, wall.baseY + b, wall.start.z + dz * a);
+      sketch.geometry.setFromPoints([at(box.offset, box.sill), at(box.offset + box.width, box.sill), at(box.offset + box.width, box.sill + box.height), at(box.offset, box.sill + box.height)]);
+      sketch.visible = true;
+    };
+
     let start = { x: 0, y: 0 }, hover: { x: number; y: number } | null = null;
     const down = (e: PointerEvent) => {
       start = { x: e.clientX, y: e.clientY };
+      if (marking) {
+        const at = onWall(e.clientX, e.clientY); if (!at) return;
+        drawing = at; drawn = null; e.stopImmediatePropagation(); controls.enabled = false; canvas.setPointerCapture(e.pointerId); return;
+      }
       if (!measure) return;
       dragging = grip(e.clientX, e.clientY);
       if (dragging < 0) return;
@@ -289,6 +328,12 @@ export default function RoomViewer({ room, furniture, cutaway, ceiling, selected
       e.stopImmediatePropagation(); controls.enabled = false; canvas.setPointerCapture(e.pointerId);
     };
     const up = (e: PointerEvent) => {
+      if (drawing) {
+        const box = drawn; drawing = null; drawn = null; sketch.visible = false; controls.enabled = true;
+        if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+        if (box && box.width >= 0.03 && box.height >= 0.03) onDrawRef.current(box);
+        return;
+      }
       if (dragging >= 0) { dragging = -1; dragSnap = ''; controls.enabled = true; if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId); return; }
       if (Math.hypot(start.x - e.clientX, start.y - e.clientY) > 5) return;
       const hit = pick(e.clientX, e.clientY);
@@ -309,6 +354,13 @@ export default function RoomViewer({ room, furniture, cutaway, ceiling, selected
     };
     const move = (e: PointerEvent) => {
       hover = e.pointerType === 'touch' ? null : { x: e.clientX, y: e.clientY };
+      if (drawing) {
+        const at = onWall(e.clientX, e.clientY, drawing.wall.id); if (!at) return;
+        drawn = boxFrom(at); showBox(drawn);
+        tooltip.hidden = false; tooltip.textContent = `${(drawn.width * 100).toFixed(1)} × ${(drawn.height * 100).toFixed(1)} cm · ${(drawn.offset * 100).toFixed(1)} cm from the wall start · ${(drawn.sill * 100).toFixed(1)} cm up`;
+        const rect = canvas.getBoundingClientRect(); tooltip.style.left = `${e.clientX - rect.left + 14}px`; tooltip.style.top = `${e.clientY - rect.top + 14}px`;
+        return;
+      }
       if (dragging < 0) return;
       const placed = resolve(e.clientX, e.clientY); if (!placed) return;
       marks[dragging] = placed.point; dragSnap = placed.snap; redraw();
@@ -358,15 +410,18 @@ export default function RoomViewer({ room, furniture, cutaway, ceiling, selected
       // Picking among hundreds of thousands of points is slow, so the scanned view checks the pointer about 12 times a second.
       const now = performance.now(), due = !lidar || now - hoverAt > 80;
       if (due) preview.visible = band.visible = false;
-      if (hover && due) {
+      if (hover && due && !drawing) {
         hoverAt = now;
         let text = '';
         const held = measure ? (dragging >= 0 ? dragging : grip(hover.x, hover.y)) : -1;
+        if (marking) { const at = onWall(hover.x, hover.y); text = at ? `Wall ${room.walls.indexOf(at.wall) + 1} · drag to draw a box` : ''; }
         if (held >= 0) {
           // Over or holding an end: show where it sits and the length it gives, instead of offering a new point.
           preview.visible = true; preview.position.copy(marks[held]); preview.material = dragging >= 0 && !dragSnap ? redDot : greenDot;
           const length = marks.length === 2 ? `${marks[0].distanceTo(marks[1]).toFixed(2)} m` : '';
           text = dragging >= 0 ? `${length}${dragSnap ? ` · locked to ${dragSnap}` : ''}` || 'Moving the point' : `${length ? `${length} · ` : ''}drag to adjust`;
+        } else if (marking) {
+          // the hint for drawing is set above
         } else if (measure) {
           const placed = resolve(hover.x, hover.y);
           if (placed) {
@@ -385,7 +440,7 @@ export default function RoomViewer({ room, furniture, cutaway, ceiling, selected
         tooltip.hidden = !text; tooltip.textContent = text; // Keep the tip inside the view: flip it to the other side of the pointer near the right and bottom edges.
         const x = hover.x - rect.left, y = hover.y - rect.top, wide = tooltip.offsetWidth, tall = tooltip.offsetHeight;
         tooltip.style.left = `${x + 14 + wide > rect.width ? Math.max(4, x - wide - 10) : x + 14}px`; tooltip.style.top = `${y + 14 + tall > rect.height ? Math.max(4, y - tall - 10) : y + 14}px`;
-        canvas.style.cursor = held >= 0 ? (dragging >= 0 ? 'grabbing' : 'grab') : measure ? 'crosshair' : text ? 'pointer' : '';
+        canvas.style.cursor = held >= 0 ? (dragging >= 0 ? 'grabbing' : 'grab') : measure || marking ? 'crosshair' : text ? 'pointer' : '';
       }
       renderer.render(scene, camera);
     }; draw();
@@ -395,7 +450,7 @@ export default function RoomViewer({ room, furniture, cutaway, ceiling, selected
       canvas.removeEventListener('pointerdown', down, true); canvas.removeEventListener('pointerup', up); canvas.removeEventListener('dblclick', dive); canvas.removeEventListener('pointermove', move); canvas.removeEventListener('pointerleave', leave); canvas.removeEventListener('wheel', lens);
       clearMarks(); cleanup.forEach(dispose => dispose()); disposeGroup(scene); renderer.dispose(); container.removeChild(canvas); tooltip.hidden = true;
     };
-  }, [room, furniture, cutaway, ceiling, selected, resetKey, labels, measure, fixtures, display]);
+  }, [room, furniture, cutaway, ceiling, selected, resetKey, labels, measure, fixtures, display, marking]);
   // Changing the view or asking to focus moves the existing camera; it must not rebuild the scene.
   const mounted = useRef(false);
   useEffect(() => { if (mounted.current) api.current?.go(view, true); mounted.current = true; }, [view, viewKey]);

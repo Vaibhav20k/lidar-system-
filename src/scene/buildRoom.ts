@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { wallLength, type Room } from '../domain/room';
+import { wallInside, wallLength, type Room } from '../domain/room';
 
 export function buildRoomGroup(room: Room, options: { furniture?: boolean; selected?: string; ceiling?: boolean; markers?: boolean; fixtures?: boolean } = {}) {
   const root = new THREE.Group(); root.name = room.name;
@@ -49,7 +49,6 @@ export function buildRoomGroup(room: Room, options: { furniture?: boolean; selec
       }
     }
   }
-  const center = { x: room.walls.reduce((sum, w) => sum + w.start.x + w.end.x, 0) / (room.walls.length * 2), z: room.walls.reduce((sum, w) => sum + w.start.z + w.end.z, 0) / (room.walls.length * 2) };
   for (const wall of room.walls) {
     const group = new THREE.Group(); group.name = `Wall ${wall.id}`; group.userData.wallId = wall.id;
     const length = wallLength(wall), dx = wall.end.x - wall.start.x, dz = wall.end.z - wall.start.z;
@@ -57,26 +56,28 @@ export function buildRoomGroup(room: Room, options: { furniture?: boolean; selec
     const openings = room.openings.filter(o => o.wallId === wall.id);
     const cuts = [...new Set([0, length, ...openings.flatMap(o => [o.offset, o.offset + o.width])])].sort((a, b) => a - b);
     const wallMat = material(options.selected === wall.id ? '#c7d9a7' : '#eeede6');
+    // Local +Z points to (-dz, dx) in the world; plates go on whichever wall face looks into the room.
+    const inside = wallInside(room, wall);
+    // The wall line is the wall's inner surface (where it was measured): the thickness goes behind it, not into the room,
+    // or things standing close to the wall would be hidden in it and measurements would stop short of the wall.
+    const back = -inside * wall.thickness / 2;
     for (let i = 0; i < cuts.length - 1; i++) {
       const start = cuts[i], end = cuts[i + 1], mid = (start + end) / 2;
       const gaps = openings.filter(o => mid > o.offset && mid < o.offset + o.width).map(o => [o.sill, o.sill + o.height]).sort((a, b) => a[0] - b[0]);
       let y = 0;
       for (const [bottom, top] of [...gaps, [wall.height, wall.height]]) {
-        if (bottom > y + 0.001) box([end - start, bottom - y, wall.thickness], [mid, (bottom + y) / 2, 0], wallMat, group, wall.id);
+        if (bottom > y + 0.001) box([end - start, bottom - y, wall.thickness], [mid, (bottom + y) / 2, back], wallMat, group, wall.id);
         y = top;
       }
     }
     for (const opening of openings) {
       const mat = material(options.selected === opening.id ? '#88bdb0' : opening.kind === 'window' ? '#b8d8d7' : '#cfb994', opening.kind === 'window' ? 0.38 : 0.65);
-      box([opening.width, opening.height, 0.025], [opening.offset + opening.width / 2, opening.sill + opening.height / 2, 0], mat, group, opening.id);
+      box([opening.width, opening.height, 0.025], [opening.offset + opening.width / 2, opening.sill + opening.height / 2, back], mat, group, opening.id);
       const trim = material('#a6aba0');
-      box([opening.width + 0.06, 0.045, wall.thickness + 0.025], [opening.offset + opening.width / 2, opening.sill + opening.height, 0], trim, group, opening.id);
+      box([opening.width + 0.06, 0.045, wall.thickness + 0.025], [opening.offset + opening.width / 2, opening.sill + opening.height, back], trim, group, opening.id);
     }
-    // Local +Z points to (-dz, dx) in the world; plates go on whichever wall face looks into the room.
-    // Scanned walls already run so that this side faces the room; a centre test would pick the back of short jog walls in L-shaped rooms.
-    const inside = room.source === 'roomplan' || (center.x - wall.start.x) * -dz + (center.z - wall.start.z) * dx >= 0 ? 1 : -1;
     for (const fixture of options.fixtures === false ? [] : (room.fixtures ?? []).filter(f => f.wallId === wall.id)) {
-      const picked = options.selected === fixture.id, face = inside * (wall.thickness / 2 + 0.006);
+      const picked = options.selected === fixture.id, face = inside * 0.006;
       const at = (x: number, y: number, out: number): [number, number, number] => [fixture.offset + fixture.width / 2 + x, fixture.sill + fixture.height / 2 + y, face + inside * out];
       // The coloured surround is an on-screen marker so small plates stay findable; exports leave it out.
       const lit = material('#ffe9a8'), dark = material('#26272b');
@@ -87,6 +88,11 @@ export function buildRoomGroup(room: Room, options: { furniture?: boolean; selec
         box([fixture.width, fixture.height, proud], at(0, 0, proud / 2), material('#f4f4f0'), group, fixture.id);
         box([fixture.width * 0.86, fixture.height * 0.12, 0.012], at(0, -fixture.height * 0.3, proud + 0.004), material('#b9bcc0'), group, fixture.id);
       } else if (fixture.kind === 'hole') box([fixture.width, fixture.height, 0.012], at(0, 0, 0.004), dark, group, fixture.id);
+      else if (fixture.kind === 'water_point' || fixture.kind === 'drain') {
+        // A pipe end: a short blue (water) or grey (waste) stub standing out of the wall.
+        const pipe = new THREE.Mesh(new THREE.CylinderGeometry(Math.min(fixture.width, fixture.height) / 2, Math.min(fixture.width, fixture.height) / 2, 0.05, 20), material(fixture.kind === 'drain' ? '#8d9196' : '#4f8fbf'));
+        pipe.rotation.x = Math.PI / 2; pipe.position.set(...at(0, 0, 0.025)); pipe.userData.elementId = fixture.id; group.add(pipe);
+      }
       else if (fixture.kind === 'light') box([fixture.width, fixture.height, 0.05], at(0, 0, 0.025), lit, group, fixture.id);
       else {
         box([fixture.width, fixture.height, 0.02], at(0, 0, 0.008), material('#f7f5ee'), group, fixture.id);

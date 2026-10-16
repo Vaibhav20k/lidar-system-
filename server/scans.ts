@@ -70,7 +70,7 @@ export function mountScans(app: express.Express, dataDirectory: string) {
     try { room = parseRoom(req.body?.room); } catch { res.status(400).json({ error: 'Invalid room.' }); return; }
     if (!req.body?.capture || typeof req.body.capture !== 'object') { res.status(400).json({ error: 'The capture is missing.' }); return; }
     if (jobs.get(id)?.status === 'processing') { res.status(202).json({ status: 'processing' }); return; }
-    const capture = join(folder, 'capture.json'), plain = join(folder, 'room.json'), withCeiling = join(folder, 'room-ceiling.json'), refitted = join(folder, 'room-refit.json'), full = join(folder, 'room-full.json'), found = join(folder, 'detect'), walled = join(folder, 'room-walls.json'), levelled = join(folder, 'room-floor.json');
+    const capture = join(folder, 'capture.json'), plain = join(folder, 'room.json'), withCeiling = join(folder, 'room-ceiling.json'), refitted = join(folder, 'room-refit.json'), full = join(folder, 'room-full.json'), found = join(folder, 'detect'), walled = join(folder, 'room-walls.json'), levelled = join(folder, 'room-floor.json'), refined = join(folder, 'room-refined.json');
     writeFileSync(capture, JSON.stringify(req.body.capture)); writeFileSync(plain, JSON.stringify({ ...room, originalUsdzPath: undefined }));
     const job: Job = { status: 'processing', stage: 'Measuring the ceiling', notes: [] };
     jobs.set(id, job);
@@ -91,6 +91,9 @@ export function mountScans(app: express.Express, dataDirectory: string) {
           await run(python, [join(scripts, 'detect.py'), capture, bundle, found, ...(measuredCeiling ? ['--room', withCeiling] : [])]);
           await run(python, [join(scripts, 'apply_fixtures.py'), latest, join(found, 'fixtures.json'), full]);
           latest = full; job.notes.push('Fixtures found on scan photos.');
+          // The detector's boxes are a little loose; measure the plates' real edges on the photos.
+          try { await run(python, [join(scripts, 'refine_fixtures.py'), capture, bundle, full, refined]); latest = refined; job.notes.push('Plate edges measured on photos.'); }
+          catch (e) { job.notes.push(`Plate edges not measured: ${e instanceof Error ? e.message : 'unknown error'}`); }
         } catch (e) { job.notes.push(`Fixtures not detected: ${e instanceof Error ? e.message : 'unknown error'}`); }
       } else job.notes.push('Fixture detection is switched off on this server.');
       // These two change the walls and heights the steps above measured against, so they run last.

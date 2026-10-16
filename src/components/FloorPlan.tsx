@@ -1,4 +1,4 @@
-import { bounds, columnName, columnsOf, fixtureLabel, wallLength, type Room } from '../domain/room';
+import { bounds, columnName, columnsOf, fixtureLabel, wallInside, wallLength, type Room } from '../domain/room';
 export default function FloorPlan({ room, selected = '', onSelect }: { room: Room; selected?: string; onSelect?: (id: string) => void }) {
   const b = bounds(room), columns = columnsOf(room), margin = 0.9, width = b.width + margin * 2, height = b.depth + margin * 2;
   return <svg className="floorplan" viewBox={`${b.minX - margin} ${b.minZ - margin} ${width} ${height}`} role="img" aria-label="Measured room floorplan">
@@ -10,7 +10,9 @@ export default function FloorPlan({ room, selected = '', onSelect }: { room: Roo
       {/chair|sofa/.test(o.category) && o.attributes?.ChairType !== 'stool' && o.attributes?.ChairBackType !== 'missing' ? <rect x={-o.size.x / 2} y={-o.size.z / 2} width={o.size.x} height={o.size.z * 0.18} rx=".03" fill="#899278" /> : null}
       {/bed/.test(o.category) ? [-1, 1].map(side => <rect key={side} x={side * o.size.x * 0.22 - o.size.x * 0.18} y={-o.size.z * 0.46} width={o.size.x * 0.36} height={o.size.z * 0.16} rx=".04" fill="#f3f1e8" stroke="#899278" strokeWidth=".012" />) : null}</g>)}
     {room.walls.map((w, i) => { const column = columns.find(c => c.wallIds.includes(w.id)); return <g key={w.id} className={onSelect ? 'plan-wall' : ''} role={onSelect ? 'button' : undefined} tabIndex={onSelect ? 0 : undefined} aria-label={column ? `Select ${columnName(column)}` : `Select wall ${i + 1}, ${wallLength(w).toFixed(2)} meters`} onClick={() => onSelect?.(w.id)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect?.(w.id); } }}>
-      <line x1={w.start.x} y1={w.start.z} x2={w.end.x} y2={w.end.z} stroke={selected === w.id ? '#648246' : '#434d43'} strokeWidth={w.thickness} />
+      {/* The wall line is the wall's inner face: the thickness is drawn behind it, as in the 3D model. */}
+      {(() => { const l = wallLength(w), back = -wallInside(room, w) * w.thickness / 2, ox = -(w.end.z - w.start.z) / l * back, oz = (w.end.x - w.start.x) / l * back;
+        return <line x1={w.start.x + ox} y1={w.start.z + oz} x2={w.end.x + ox} y2={w.end.z + oz} stroke={selected === w.id ? '#648246' : '#434d43'} strokeWidth={w.thickness} />; })()}
       <line x1={w.start.x} y1={w.start.z} x2={w.end.x} y2={w.end.z} stroke="transparent" strokeWidth=".35" />
       {/* A column is named once at its corner; its faces carry no lengths of their own. */}
       {column ? (column.wallIds[0] === w.id ? <text x={w.end.x} y={w.end.z + 0.3} textAnchor="middle" fontSize=".13" fill="#26372c" stroke="#f3f3ed" strokeWidth=".05" paintOrder="stroke">{columnName(column)}</text> : null)
@@ -21,7 +23,7 @@ export default function FloorPlan({ room, selected = '', onSelect }: { room: Roo
     {(room.ceiling?.regions ?? []).map((d, i) => { const lower = d.height < room.ceiling!.height; return <polygon key={i} points={d.points.map(p => `${p.x},${p.z}`).join(' ')} fill="#7c8a9a" fillOpacity={lower ? 0.12 : 0} stroke="#5d6b7b" strokeWidth=".02" strokeDasharray={lower ? '.09 .06' : '.02 .05'}><title>{`Ceiling ${lower ? 'drops' : 'rises'} to ${d.height.toFixed(2)} m here`}</title></polygon>; })}
     {(room.fixtures ?? []).map(f => { const w = room.walls.find(w => w.id === f.wallId)!; const length = wallLength(w), dx = (w.end.x - w.start.x) / length, dz = (w.end.z - w.start.z) / length, along = f.offset + f.width / 2;
       // Nudge the marker onto the room side of the wall line.
-      const side = room.source === 'roomplan' || ((b.minX + b.maxX) / 2 - w.start.x) * -dz + ((b.minZ + b.maxZ) / 2 - w.start.z) * dx >= 0 ? 1 : -1, out = w.thickness / 2 + 0.06;
+      const side = wallInside(room, w), out = 0.06;
       return <g key={f.id} className={onSelect ? 'plan-wall' : ''} onClick={() => onSelect?.(f.id)}><title>{`${fixtureLabel(f.kind)}, ${(f.sill + f.height / 2).toFixed(2)} m above floor`}</title><rect x={-Math.max(0.1, f.width) / 2} y={-0.045} width={Math.max(0.1, f.width)} height={0.09} rx=".02" transform={`translate(${w.start.x + dx * along - dz * side * out},${w.start.z + dz * along + dx * side * out}) rotate(${Math.atan2(dz, dx) * 180 / Math.PI})`} fill={selected === f.id ? '#648246' : f.kind === 'light' ? '#e2b53c' : f.kind === 'hole' ? '#26272b' : f.kind === 'ac_unit' ? '#5d8fb5' : '#e07b39'} stroke="#f3f3ed" strokeWidth=".012" /></g>; })}
     {/* Ceiling items, as on a reflected ceiling plan: lights are crossed circles, holes are dark squares. */}
     {(room.ceiling?.items ?? []).map(i => <g key={i.id} className={onSelect ? 'plan-wall' : ''} onClick={() => onSelect?.(i.id)} transform={`translate(${i.x},${i.z}) rotate(${i.rotation * 180 / Math.PI})`}><title>{`${fixtureLabel(i.kind)} on the ceiling at ${i.height.toFixed(2)} m`}</title>

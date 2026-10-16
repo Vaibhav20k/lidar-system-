@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { Plus, Trash2, Ruler, Box, DoorOpen, Plug, Lightbulb, CircleDot, AirVent, TriangleAlert, Columns2 } from 'lucide-react';
+import { Plus, Trash2, Ruler, Box, DoorOpen, Plug, Lightbulb, CircleDot, AirVent, TriangleAlert, Columns2, Droplet } from 'lucide-react';
 import { calibrateRoom, columnName, columnsOf, fixtureLabel, setRoomHeight, wallLength, updateCorner, type Fixture, type Room } from '../domain/room';
 import Dialog from './Dialog';
 
 const value = (data: FormData, key: string) => Number(data.get(key));
-const KindIcon = ({ kind }: { kind: Fixture['kind'] }) => kind === 'light' ? <Lightbulb size={17} /> : kind === 'hole' ? <CircleDot size={17} /> : kind === 'ac_unit' ? <AirVent size={17} /> : <Plug size={17} />;
+const KindIcon = ({ kind }: { kind: Fixture['kind'] }) => kind === 'light' ? <Lightbulb size={17} /> : kind === 'hole' ? <CircleDot size={17} /> : kind === 'ac_unit' ? <AirVent size={17} /> : kind === 'water_point' || kind === 'drain' ? <Droplet size={17} /> : <Plug size={17} />;
 function Numeric({ name, label, initial, min = 0.01, max = 100, step = 0.001 }: { name: string; label: string; initial: number; min?: number; max?: number; step?: number }) {
   return <label>{label}<div className="input-unit"><input name={name} type="number" required defaultValue={Number(initial.toFixed(3))} min={min} max={max} step={step} /><span>{name === 'rotation' ? '°' : 'm'}</span></div></label>;
 }

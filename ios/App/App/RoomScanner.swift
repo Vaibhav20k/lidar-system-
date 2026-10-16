@@ -6,6 +6,7 @@ import ARKit
 import CoreImage
 import ImageIO
 import simd
+import SceneKit
 
 class RoomformViewController: CAPBridgeViewController {
     override func capacitorDidLoad() {
@@ -191,7 +192,7 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
     static let maxRooms = 12
     var completion: ((Result<[[String: Any]], Error>) -> Void)?
     var recordRaw = true
-    private enum Phase { case scanning, processing, reviewing }
+    private enum Phase { case scanning, processing, wallPhotos, reviewing }
     private let captureView = RoomCaptureView(frame: .zero)
     private let leftButton = UIButton(type: .system), rightButton = UIButton(type: .system)
     private var phase = Phase.scanning
@@ -200,8 +201,15 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
     private var roomId = UUID().uuidString
     private var recorder: RawCaptureRecorder?
     private var captures: [[String: Any]] = []
-    // From iOS 17 the ARSession keeps running between rooms, so every room shares one coordinate space.
-    private var sharedSpace: Bool { if #available(iOS 17.0, *) { return true } else { return false } }
+    private var wallPass: AnyObject?  // WallPhotoPass, iOS 17 only
+    private var wallPassCapture: (index: Int, json: URL)?
+    private let hint = UILabel()
+    private let measuring = DispatchGroup()   // ceilings being measured in the background
+    private var finishing = false              // finish() has started; nothing new may begin
+    private var spaceRestarted = false         // the photo step's camera switch restarted ARKit's coordinates
+    // From iOS 17 the ARSession keeps running between rooms, so every room shares one coordinate space, unless the
+    // coordinates were restarted (rooms scanned after that are in a new space).
+    private var sharedSpace: Bool { if #available(iOS 17.0, *) { return !spaceRestarted } else { return false } }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -223,6 +231,16 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
             bar.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 20),
             bar.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -20),
             bar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12), bar.heightAnchor.constraint(equalToConstant: 54)
+        ])
+        hint.translatesAutoresizingMaskIntoConstraints = false
+        hint.numberOfLines = 0; hint.textAlignment = .center; hint.font = .preferredFont(forTextStyle: .headline)
+        hint.textColor = .white; hint.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        hint.layer.cornerRadius = 12; hint.clipsToBounds = true; hint.isHidden = true
+        view.addSubview(hint)
+        NSLayoutConstraint.activate([
+            hint.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            hint.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            hint.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16)
         ])
         NotificationCenter.default.addObserver(self, selector: #selector(interrupted), name: UIApplication.didEnterBackgroundNotification, object: nil)
         startRoom()
@@ -248,6 +266,9 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
         case .processing:
             leftButton.isEnabled = false
             rightButton.setTitle("Building room…", for: .normal); rightButton.isEnabled = false
+        case .wallPhotos:
+            leftButton.setTitle("Skip photos", for: .normal); leftButton.isEnabled = true
+            rightButton.setTitle("Photos done", for: .normal); rightButton.isEnabled = true
         case .reviewing:
             leftButton.setTitle("Next room", for: .normal); leftButton.isEnabled = captures.count < Self.maxRooms
             rightButton.setTitle(captures.count == 1 ? "Done" : "Done (\(captures.count) rooms)", for: .normal); rightButton.isEnabled = true
@@ -255,12 +276,12 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
     }
 
     @objc private func leftTapped() {
-        guard !finished else { return }
-        if phase == .scanning { endScan("Scan cancelled") } else if phase == .reviewing { startRoom() }
+        guard !finished, !finishing else { return }
+        if phase == .scanning { endScan("Scan cancelled") } else if phase == .wallPhotos { finishWallPhotos() } else if phase == .reviewing { startRoom() }
     }
     @objc private func rightTapped() {
-        guard !finished else { return }
-        if phase == .scanning { finishRoom() } else if phase == .reviewing { finish(.success(captures)) }
+        guard !finished, !finishing else { return }
+        if phase == .scanning { finishRoom() } else if phase == .wallPhotos { finishWallPhotos() } else if phase == .reviewing { finish(.success(captures)) }
     }
     private func finishRoom() {
         phase = .processing; updateBar()
@@ -280,9 +301,15 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
         finish(.failure(NSError(domain: "Roomform", code: 1, userInfo: [NSLocalizedDescriptionKey: message])))
     }
     private func finish(_ result: Result<[[String: Any]], Error>) {
-        DispatchQueue.main.async {
+        guard !finishing else { return }
+        finishing = true
+        // Rooms whose ceiling is still being measured are handed over once it is done.
+        if wallPass != nil { finishWallPhotos() }
+        rightButton.setTitle("Measuring ceiling…", for: .normal); rightButton.isEnabled = false; leftButton.isEnabled = false
+        measuring.notify(queue: .main) {
             guard !self.finished else { return }
             self.finished = true; self.timeout?.invalidate()
+            let result: Result<[[String: Any]], Error> = { if case .success = result { return .success(self.captures) }; return result }()
             // A recorder still present here belongs to a room that never completed.
             self.recorder?.discard(); self.recorder = nil
             self.captureView.captureSession.stop()
@@ -305,7 +332,7 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
         return !finished
     }
     func captureView(didPresent processedResult: CapturedRoom, error: Error?) {
-        guard !finished, phase == .processing else { return }
+        guard !finished, !finishing, phase == .processing else { return }
         timeout?.invalidate()
         if let error = error { roomFailed(error.localizedDescription); return }
         guard processedResult.walls.count >= 3 else { roomFailed("Too few walls detected. Scan every wall, including corners, then finish."); return }
@@ -347,8 +374,86 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
             let json = try JSONSerialization.data(withJSONObject: capture, options: [.prettyPrinted, .sortedKeys])
             try json.write(to: folder.appendingPathComponent(id).appendingPathExtension("json"), options: .atomic)
             captures.append(capture)
-            phase = .reviewing; updateBar()
+            let jsonURL = folder.appendingPathComponent(id).appendingPathExtension("json")
+            measureCeiling(room: processedResult, index: captures.count - 1, json: jsonURL)
+            if #available(iOS 17.0, *), let raw = capture["rawPath"] as? String {
+                startWallPhotos(walls: processedResult.walls, raw: URL(fileURLWithPath: raw), index: captures.count - 1, json: jsonURL)
+            } else {
+                phase = .reviewing; updateBar()
+            }
         } catch { roomFailed(error.localizedDescription) }
+    }
+
+    /// Ceiling, beams along walls and hanging fixtures from the raw LiDAR, on the phone, while the user takes wall photos.
+    private func measureCeiling(room: CapturedRoom, index: Int, json: URL) {
+        guard let raw = captures[index]["rawPath"] as? String else { return }
+        let walls = room.walls.map { CeilingEstimator.WallSurface(id: $0.identifier.uuidString, transform: $0.transform, width: $0.dimensions.x, height: $0.dimensions.y) }
+        var corners: [SIMD2<Float>] = []
+        if #available(iOS 17.0, *), let floor = room.floors.max(by: { $0.polygonCorners.count < $1.polygonCorners.count }) {
+            corners = floor.polygonCorners.map { p in
+                let w = floor.transform * SIMD4(p.x, p.y, 0, 1)
+                return SIMD2(w.x, w.z)
+            }
+        }
+        let estimator = CeilingEstimator(walls: walls, floor: CeilingEstimator.floorOutline(walls: walls, floorCorners: corners))
+        measuring.enter()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let ceiling = estimator.estimate(raw: URL(fileURLWithPath: raw))
+            DispatchQueue.main.async {
+                defer { self?.measuring.leave() }
+                guard let self = self, let ceiling = ceiling, index < self.captures.count else { return }
+                self.captures[index]["ceiling"] = ceiling
+                if let data = try? JSONSerialization.data(withJSONObject: self.captures[index], options: [.prettyPrinted, .sortedKeys]) { try? data.write(to: json, options: .atomic) }
+            }
+        }
+    }
+
+    /// Straight-on, full-resolution photos of each wall while the AR session is still running in the scan's
+    /// coordinates. Video keyframes are small and taken at angles; these give the detail that plate edges, window
+    /// frames and narrow gaps need.
+    @available(iOS 17.0, *)
+    private func startWallPhotos(walls: [CapturedRoom.Surface], raw: URL, index: Int, json: URL) {
+        guard !finishing else { phase = .reviewing; updateBar(); return }
+        let targets = walls.filter { $0.dimensions.x >= 0.6 }.map { WallPhotoPass.Target(id: $0.identifier.uuidString, transform: $0.transform, width: $0.dimensions.x, height: $0.dimensions.y) }
+        let session = captureView.captureSession.arSession
+        guard !targets.isEmpty, let pass = try? WallPhotoPass(session: session, targets: targets, folder: raw) else {
+            phase = .reviewing; updateBar(); return
+        }
+        // RoomPlan runs the camera in a video format; full-resolution stills need the format meant for them. Switching
+        // can restart ARKit's coordinates, so the camera's pose just before is kept to tie the new ones back to the scan.
+        if let format = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing, let before = session.currentFrame {
+            pass.realign(from: before.camera.transform, at: before.timestamp)
+            let configuration = ARWorldTrackingConfiguration()
+            configuration.videoFormat = format
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) { configuration.frameSemantics.insert(.sceneDepth) }
+            session.run(configuration)
+        }
+        wallPass = pass; wallPassCapture = (index, json)
+        pass.view.translatesAutoresizingMaskIntoConstraints = false
+        view.insertSubview(pass.view, aboveSubview: captureView)
+        NSLayoutConstraint.activate([
+            pass.view.topAnchor.constraint(equalTo: view.topAnchor), pass.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            pass.view.leadingAnchor.constraint(equalTo: view.leadingAnchor), pass.view.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        ])
+        hint.isHidden = false
+        pass.onUpdate = { [weak self] text in self?.hint.text = "  " + text + "  " }
+        pass.start()
+        phase = .wallPhotos; updateBar()
+    }
+
+    private func finishWallPhotos() {
+        guard #available(iOS 17.0, *), let pass = wallPass as? WallPhotoPass else { return }
+        let count = pass.stop()
+        if pass.restarted { spaceRestarted = true }
+        pass.view.removeFromSuperview()
+        hint.isHidden = true
+        wallPass = nil
+        if let (index, json) = wallPassCapture, index < captures.count, count > 0 {
+            captures[index]["rawStills"] = count
+            if let data = try? JSONSerialization.data(withJSONObject: captures[index], options: [.prettyPrinted, .sortedKeys]) { try? data.write(to: json, options: .atomic) }
+        }
+        wallPassCapture = nil
+        if !finished { phase = .reviewing; updateBar() }
     }
     private func surface(_ value: CapturedRoom.Surface, kind: String? = nil) -> [String: Any] {
         var result: [String: Any] = ["id": value.identifier.uuidString, "transform": matrix(value.transform),
@@ -362,6 +467,259 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
         (0..<4).flatMap { column in (0..<4).map { row in value[column][row] } }
     }
     deinit { timeout?.invalidate(); NotificationCenter.default.removeObserver(self) }
+}
+
+/// Guides the user to photograph each wall straight on and takes full-resolution stills automatically.
+/// Walls are drawn over the camera: grey still to do, blue the one being faced, green covered. Each wall is a grid of
+/// cells, 20 cm along the wall by three height bands (0.2-0.9, 0.9-1.6, 1.6-2.3 m). A still is taken automatically
+/// when the phone is steady, faces a wall within ~25 degrees from 0.6-4.5 m, and would show cells not yet covered in
+/// enough detail; any view fills whatever cells it shows. The shutter button takes one at any time. Each still is
+/// saved with its pose and intrinsics, and with the LiDAR depth of the same moment, into <raw>/stills.
+@available(iOS 17.0, *)
+private final class WallPhotoPass: NSObject {
+    struct Target { let id: String; let transform: simd_float4x4; let width: Float; let height: Float }
+    static let maxStills = 60, strip: Float = 0.2, coveredShare: Float = 0.85
+    static let bands: [Float] = [0.55, 1.25, 1.95]   // cell centres above the wall's base
+    static let minDetail: Float = 800  // pixels per metre of wall a still must give for a cell to count (8 px per cm)
+    let view = ARSCNView(frame: .zero)
+    var onUpdate: ((String) -> Void)?
+    private weak var session: ARSession?
+    private let targets: [Target]
+    private var covered: [[Bool]]
+    private var nodes: [SCNNode] = []
+    private let folder: URL, index: FileHandle
+    private let queue = DispatchQueue(label: "roomform.wall-stills", qos: .userInitiated)
+    private let context = CIContext()
+    private let flash = UIView()
+    private let shutter = UIButton(type: .custom)
+    private var timer: Timer?, lastPose: simd_float4x4?, lastShot = Date.distantPast
+    private var shooting = false, count = 0
+    private var stillWidth: Float?   // learnt from a test still at the start
+    // ARKit coordinates after the camera switch -> the scan's. Measured from the camera's pose just before the switch and
+    // the first pose after it (the phone is held still in between); the Mac refines it from the stills' depth.
+    private var toScan = matrix_identity_float4x4
+    private var pendingAlign: (pose: simd_float4x4, time: TimeInterval)?
+    private(set) var restarted = false   // the camera switch did restart the coordinates
+
+    init(session: ARSession, targets: [Target], folder: URL) throws {
+        self.session = session; self.targets = targets
+        self.covered = targets.map { t in
+            let strips = max(1, Int((t.width / Self.strip).rounded(.up))), rows = Self.bands.filter { $0 < t.height - 0.1 }.count
+            return Array(repeating: false, count: strips * max(1, rows))
+        }
+        self.folder = folder.appendingPathComponent("stills", isDirectory: true)
+        try FileManager.default.createDirectory(at: self.folder, withIntermediateDirectories: true)
+        let file = folder.appendingPathComponent("stills.jsonl")
+        guard FileManager.default.createFile(atPath: file.path, contents: nil) else { throw CocoaError(.fileWriteUnknown) }
+        index = try FileHandle(forWritingTo: file)
+        super.init()
+        view.session = session
+        view.scene = SCNScene()
+        view.automaticallyUpdatesLighting = false
+        for target in targets {
+            let plane = SCNPlane(width: CGFloat(target.width), height: CGFloat(target.height))
+            plane.firstMaterial?.isDoubleSided = true
+            plane.firstMaterial?.lightingModel = .constant
+            let node = SCNNode(geometry: plane)
+            node.simdTransform = target.transform
+            view.scene.rootNode.addChildNode(node); nodes.append(node)
+        }
+        flash.backgroundColor = .white; flash.alpha = 0; flash.isUserInteractionEnabled = false
+        flash.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(flash)
+        shutter.backgroundColor = .white
+        shutter.layer.cornerRadius = 36; shutter.layer.borderWidth = 5; shutter.layer.borderColor = UIColor.black.withAlphaComponent(0.25).cgColor
+        shutter.accessibilityLabel = "Take a wall photo"
+        shutter.translatesAutoresizingMaskIntoConstraints = false
+        shutter.addTarget(self, action: #selector(shutterTapped), for: .touchUpInside)
+        view.addSubview(shutter)
+        NSLayoutConstraint.activate([flash.topAnchor.constraint(equalTo: view.topAnchor), flash.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+                                     flash.leadingAnchor.constraint(equalTo: view.leadingAnchor), flash.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                                     shutter.widthAnchor.constraint(equalToConstant: 72), shutter.heightAnchor.constraint(equalToConstant: 72),
+                                     shutter.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+                                     shutter.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -84)])
+    }
+
+    func realign(from pose: simd_float4x4, at time: TimeInterval) { pendingAlign = (pose, time) }
+
+    /// A camera pose in the scan's coordinates.
+    private func scanPose(_ camera: ARCamera) -> simd_float4x4 { toScan * camera.transform }
+
+    func start() {
+        // A test still tells how big the stills are, so detail is judged for them and not for the smaller video frames.
+        session?.captureHighResolutionFrame { [weak self] still, _ in
+            if let still = still { DispatchQueue.main.async { self?.stillWidth = Float(still.camera.imageResolution.width) } }
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in self?.tick() }
+        tick()
+    }
+
+    /// Stops and returns how many stills were saved.
+    func stop() -> Int {
+        timer?.invalidate(); timer = nil
+        queue.sync { try? index.close() }
+        return count
+    }
+
+    private func share(_ wall: Int) -> Float { Float(covered[wall].filter { $0 }.count) / Float(covered[wall].count) }
+
+    /// The wall the camera is pointed at, straight on enough to photograph.
+    private func facingWall(_ camera: ARCamera) -> Int? {
+        let pose = scanPose(camera), position = simd_make_float3(pose.columns.3), forward = -simd_make_float3(pose.columns.2)
+        var facing: Int?, best: Float = 0.9
+        for (i, t) in targets.enumerated() {
+            let n = simd_make_float3(t.transform.columns.2), origin = simd_make_float3(t.transform.columns.3)
+            let cosine = simd_dot(forward, -n), distance = simd_dot(position - origin, n)
+            guard cosine > best, distance > 0.6, distance < 4.5 else { continue }
+            let hit = position + forward * (distance / cosine) - origin
+            let u = simd_dot(hit, simd_make_float3(t.transform.columns.0)), v = simd_dot(hit, simd_make_float3(t.transform.columns.1))
+            guard abs(u) <= t.width / 2 + 0.2, abs(v) <= t.height / 2 + 0.3 else { continue }
+            facing = i; best = cosine
+        }
+        return facing
+    }
+
+    private func tick() {
+        guard let frame = session?.currentFrame else { return }
+        if let pending = pendingAlign {
+            // Wait for the first steady pose after the switch, then tie the new coordinates to the scan's.
+            guard frame.timestamp > pending.time + 0.3, case .normal = frame.camera.trackingState else { onUpdate?("Hold still for a moment…"); return }
+            // Gravity is the same before and after, so only a turn about the vertical and a shift are allowed: copying
+            // the phone's tilt between the two moments into the tie would tip every still.
+            // The turn is read from the whole relative rotation (old * new^T), which stays defined even when the phone
+            // points nearly straight up or down, where a heading from the viewing direction alone would not.
+            let relative = pending.pose * frame.camera.transform.inverse
+            let turn = atan2(relative.columns.2.x - relative.columns.0.z, relative.columns.0.x + relative.columns.2.z)
+            let before = simd_make_float3(pending.pose.columns.3), after = simd_make_float3(frame.camera.transform.columns.3)
+            // No restart: the pose barely changed, so the coordinates are still the scan's and nothing needs tying.
+            if simd_distance(before, after) < 0.15 && abs(turn) < 0.09 {
+                pendingAlign = nil
+            } else {
+            restarted = true
+            var tie = simd_float4x4(simd_quatf(angle: turn, axis: SIMD3(0, 1, 0)))
+            let moved = SIMD3(pending.pose.columns.3.x, pending.pose.columns.3.y, pending.pose.columns.3.z)
+                - simd_make_float3(tie * SIMD4(frame.camera.transform.columns.3.x, frame.camera.transform.columns.3.y, frame.camera.transform.columns.3.z, 1))
+            tie.columns.3 = SIMD4(moved.x, moved.y, moved.z, 1)
+            toScan = tie
+            pendingAlign = nil
+            for (node, target) in zip(nodes, targets) { node.simdTransform = toScan.inverse * target.transform }
+            }
+        }
+        let camera = frame.camera, pose = scanPose(camera)
+        let facing = facingWall(camera)
+        let steady: Bool = {
+            defer { lastPose = pose }
+            guard let last = lastPose else { return false }
+            return simd_distance(last.columns.3, pose.columns.3) < 0.03 && simd_dot(simd_make_float3(last.columns.2), simd_make_float3(pose.columns.2)) > 0.9986
+        }()
+        for (i, node) in nodes.enumerated() {
+            let colour: UIColor = share(i) >= Self.coveredShare ? .systemGreen : (i == facing ? .systemBlue : .systemGray)
+            node.geometry?.firstMaterial?.diffuse.contents = colour.withAlphaComponent(i == facing ? 0.35 : 0.22)
+        }
+        let done = targets.indices.filter { share($0) >= Self.coveredShare }.count
+        let summary = "Walls photographed: \(done) of \(targets.count) · \(count) photos · or tap the button"
+        guard case .normal = camera.trackingState else { onUpdate?("Hold on, tracking…\n" + summary); return }
+        guard let wall = facing else { onUpdate?("Face a wall straight on, 1–3 m away\n" + summary); return }
+        let (gain, tooFar) = newCells(wall: wall, camera: camera)
+        if gain.isEmpty {
+            let advice = share(wall) >= Self.coveredShare ? "This wall is done. Turn to the next one"
+                : tooFar ? "Come a little closer to the wall" : "Point at the part of this wall not yet green"
+            onUpdate?(advice + "\n" + summary)
+            return
+        }
+        guard steady else { onUpdate?("Hold steady…\n" + summary); return }
+        shoot(wall: wall, frame: frame)
+    }
+
+    @objc private func shutterTapped() {
+        guard pendingAlign == nil, let frame = session?.currentFrame else { return }
+        shoot(wall: facingWall(frame.camera), frame: frame, manual: true)
+    }
+
+    private func shoot(wall: Int?, frame: ARFrame, manual: Bool = false) {
+        guard !shooting, count < Self.maxStills, manual || Date().timeIntervalSince(lastShot) > 1.0, let session = session else { return }
+        shooting = true; lastShot = Date()
+        session.captureHighResolutionFrame { [weak self] still, _ in
+            DispatchQueue.main.async { self?.save(still ?? frame, depthFrame: frame, wall: wall, highResolution: still != nil, manual: manual) }
+        }
+    }
+
+    /// Cells of the wall a photo from this camera would fill, and whether some were in view but too far for the detail needed.
+    private func newCells(wall: Int, camera: ARCamera, width: Float? = nil, anyDetail: Bool = false) -> (cells: [Int], tooFar: Bool) {
+        let t = targets[wall], size = camera.imageResolution
+        let toCamera = scanPose(camera).inverse, k = camera.intrinsics
+        let scale = (width ?? stillWidth ?? Float(size.width)) / Float(size.width)
+        let rows = covered[wall].count / max(1, Int((t.width / Self.strip).rounded(.up))), strips = covered[wall].count / max(1, rows)
+        var far = false, found: [Int] = []
+        for i in 0..<strips {
+            for r in 0..<rows where !covered[wall][i * rows + r] {
+                let u = -t.width / 2 + (Float(i) + 0.5) * t.width / Float(strips), v = -t.height / 2 + Self.bands[r]
+                let p = toCamera * (t.transform * simd_float4(u, v, 0, 1)), depth = -p.z
+                guard depth > 0.3 else { continue }
+                let x = k[2][0] + k[0][0] * p.x / depth, y = k[2][1] - k[1][1] * p.y / depth
+                guard x > Float(size.width) * 0.03 && x < Float(size.width) * 0.97 && y > Float(size.height) * 0.03 && y < Float(size.height) * 0.97 else { continue }
+                if !anyDetail && k[0][0] * scale / depth < Self.minDetail { far = true; continue }
+                found.append(i * rows + r)
+            }
+        }
+        return (found, far)
+    }
+
+    private func save(_ still: ARFrame, depthFrame: ARFrame, wall: Int?, highResolution: Bool, manual: Bool) {
+        // Only a real full-resolution still says how big stills are; a video frame saved as a fallback does not.
+        let width = Float(still.camera.imageResolution.width)
+        if highResolution { stillWidth = width }
+        if let wall = wall {
+            for c in newCells(wall: wall, camera: still.camera, width: width, anyDetail: manual).cells { covered[wall][c] = true }
+        }
+        count += 1
+        let number = count, id = wall.map { targets[$0].id } ?? ""
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        flash.alpha = 0.6
+        UIView.animate(withDuration: 0.25) { self.flash.alpha = 0 }
+        queue.async { [weak self] in
+            self?.write(still, depthFrame: depthFrame, number: number, wallId: id, highResolution: highResolution)
+            DispatchQueue.main.async { self?.shooting = false }
+        }
+    }
+
+    private func write(_ still: ARFrame, depthFrame: ARFrame, number: Int, wallId: String, highResolution: Bool) {
+        let name = String(format: "s%03d", number)
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let jpeg = context.jpegRepresentation(of: CIImage(cvPixelBuffer: still.capturedImage), colorSpace: colorSpace,
+                                                    options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.88]),
+              (try? jpeg.write(to: folder.appendingPathComponent("\(name).jpg"), options: .atomic)) != nil else { return }
+        // Depth comes from the video frame of the same moment; it covers the same field of view at a lower resolution.
+        var hasDepth = false, depthSize: [Int] = []
+        if let depth = depthFrame.sceneDepth, (try? pixelBytes(depth.depthMap).write(to: folder.appendingPathComponent("\(name).depth.bin"), options: .atomic)) != nil {
+            hasDepth = true; depthSize = [CVPixelBufferGetWidth(depth.depthMap), CVPixelBufferGetHeight(depth.depthMap)]
+        }
+        let camera = still.camera, m = scanPose(camera), k = camera.intrinsics, dm = scanPose(depthFrame.camera)
+        let column = { (x: simd_float4x4) in (0..<4).flatMap { c in (0..<4).map { r in x[c][r] } } }
+        let record: [String: Any] = [
+            "frame": name, "timestamp": still.timestamp, "depth": hasDepth, "depthSize": depthSize, "wallId": wallId, "highResolution": highResolution,
+            "cameraToWorld": column(m), "depthCameraToWorld": column(dm), "toScan": column(toScan),
+            "intrinsics": (0..<3).flatMap { column in (0..<3).map { row in k[column][row] } },
+            "imageWidth": Int(camera.imageResolution.width), "imageHeight": Int(camera.imageResolution.height)
+        ]
+        guard var line = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]) else { return }
+        line.append(0x0A)
+        try? index.write(contentsOf: line)
+    }
+}
+
+/// Copies row by row because pixel buffer rows can be padded beyond width * bytesPerPixel.
+private func pixelBytes(_ buffer: CVPixelBuffer) -> Data {
+    CVPixelBufferLockBaseAddress(buffer, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+    guard let base = CVPixelBufferGetBaseAddress(buffer) else { return Data() }
+    let height = CVPixelBufferGetHeight(buffer), stride = CVPixelBufferGetBytesPerRow(buffer)
+    let rowBytes = CVPixelBufferGetWidth(buffer) * (CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_DepthFloat32 ? 4 : 1)
+    var data = Data(capacity: rowBytes * height)
+    for row in 0..<height {
+        data.append(base.advanced(by: row * stride).assumingMemoryBound(to: UInt8.self), count: rowBytes)
+    }
+    return data
 }
 
 /// Saves posed RGB + LiDAR depth keyframes from the ARSession RoomPlan is driving, so a scan can be
@@ -423,11 +781,11 @@ private final class RawCaptureRecorder {
                                                     options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.75]),
               (try? jpeg.write(to: folder.appendingPathComponent("frames/\(name).jpg"), options: .atomic)) != nil else { return }
         var hasDepth = false
-        if let depth = frame.sceneDepth, (try? bytes(depth.depthMap).write(to: folder.appendingPathComponent("depth/\(name).bin"), options: .atomic)) != nil {
+        if let depth = frame.sceneDepth, (try? pixelBytes(depth.depthMap).write(to: folder.appendingPathComponent("depth/\(name).bin"), options: .atomic)) != nil {
             hasDepth = true
             depthSize = [CVPixelBufferGetWidth(depth.depthMap), CVPixelBufferGetHeight(depth.depthMap)]
             if let confidence = depth.confidenceMap {
-                try? bytes(confidence).write(to: folder.appendingPathComponent("confidence/\(name).bin"), options: .atomic)
+                try? pixelBytes(confidence).write(to: folder.appendingPathComponent("confidence/\(name).bin"), options: .atomic)
             }
         }
         let camera = frame.camera, m = camera.transform, k = camera.intrinsics
@@ -442,20 +800,6 @@ private final class RawCaptureRecorder {
         guard (try? index.write(contentsOf: line)) != nil else { return }
         saved += 1
         if hasDepth { depthSaved += 1 }
-    }
-
-    // Copies row by row because pixel buffer rows can be padded beyond width * bytesPerPixel.
-    private func bytes(_ buffer: CVPixelBuffer) -> Data {
-        CVPixelBufferLockBaseAddress(buffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return Data() }
-        let height = CVPixelBufferGetHeight(buffer), stride = CVPixelBufferGetBytesPerRow(buffer)
-        let rowBytes = CVPixelBufferGetWidth(buffer) * (CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_DepthFloat32 ? 4 : 1)
-        var data = Data(capacity: rowBytes * height)
-        for row in 0..<height {
-            data.append(base.advanced(by: row * stride).assumingMemoryBound(to: UInt8.self), count: rowBytes)
-        }
-        return data
     }
 
     /// Writes the manifest and returns the fields to merge into the capture, or nil if nothing usable was recorded.

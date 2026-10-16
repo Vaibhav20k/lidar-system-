@@ -8,7 +8,8 @@ gap beside it and some of the wall. For furniture with a broad flat front (stora
   2. makes a straightened photo of that face, at a fixed 4 px per cm, from the keyframes;
   3. looks for the vertical edges nearest the box's sides, row by row, taking the first strong edge coming
      from inside the furniture, so a dark gap beside it is not counted as furniture;
-  4. moves the box's sides to those edges, but only when the rows agree on where the edge is.
+  4. moves the box's sides to those edges, but only when the rows agree on where the edge is; a side moved in by more
+     than 12 cm must also be where the LiDAR front face ends (a door seam is an edge on the photo, but the face goes on).
 Heights and depths are not changed. Every refit is reported with how much it moved and how sure it is.
 """
 import json
@@ -24,6 +25,8 @@ PPM = 400                 # straightened photo scale: pixels per metre
 SEARCH_IN, SEARCH_OUT = 0.30, 0.05   # how far inside / outside the box side to look for the real edge, metres
 MAX_SHRINK = 0.35        # never take away more than this share of the width: door seams and handles are edges too
 AGREE = 0.02              # rows must agree within this (median absolute deviation, metres) to trust an edge
+BIG_MOVE = 0.12           # a side moved in further than this must also be where the LiDAR front face ends
+SIDE_LEAK = 0.5           # beyond a real side, the face has at most this share of the points just inside it (door seams: ~0.7)
 KINDS = {'storage', 'refrigerator', 'oven', 'dishwasher', 'washerDryer', 'stove'}
 
 
@@ -103,6 +106,21 @@ def main():
                 sides[name] = None; continue
             at = float(np.median(hits)); spread = float(np.median(np.abs(hits - at))) / PPM
             sides[name] = ((at - mid) / PPM, spread, hits.size)
+        # A door seam or a mirror edge is a strong edge on the photo too. At the furniture's real side the front face
+        # ends: the LiDAR finds the face just inside the edge and (almost) nothing at that depth just outside it.
+        near_face = (np.abs((points - centre) @ normal) < 0.12) & (normals @ normal > 0.7) \
+            & (points[:, 1] - floor_y > bottom + 0.2) & (points[:, 1] - floor_y < bottom + o['height'] - 0.1)
+        across_face = (points[near_face] - centre) @ right
+
+        def face_ends(edge, sign):
+            inside = ((across_face - edge) * sign > -0.08) & ((across_face - edge) * sign < -0.02)
+            outside = ((across_face - edge) * sign > 0.02) & ((across_face - edge) * sign < 0.08)
+            return inside.sum() >= 30 and outside.sum() <= SIDE_LEAK * inside.sum()
+        for name, sign in (('left', -1), ('right', 1)):
+            moved_in = (half - sides[name][0] * sign) if sides[name] else 0.0
+            if sides[name] and sides[name][1] <= AGREE and moved_in > BIG_MOVE and not face_ends(sides[name][0], sign):
+                print(f"{o['category']} {2 * half * 100:.0f} cm: {name} edge at {sides[name][0] * 100:+.1f} cm is not where the front face ends (a door seam?); side kept")
+                sides[name] = None
         new_left = sides['left'][0] if sides['left'] and sides['left'][1] <= AGREE else -half
         new_right = sides['right'][0] if sides['right'] and sides['right'][1] <= AGREE else half
         width = new_right - new_left

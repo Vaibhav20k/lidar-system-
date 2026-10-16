@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { floorArea, newRoom, parseRoom, calibrateRoom, updateCorner, polygonErrors, wallsFromFloor, wallLength, columnsOf, setRoomHeight } from '../src/domain/room';
+import { floorArea, newRoom, parseRoom, calibrateRoom, updateCorner, polygonErrors, wallsFromFloor, wallLength, columnsOf, setRoomHeight, pointDimensions, pointsCsv, wallInside, beamsAlongWall } from '../src/domain/room';
 import { sampleRoom } from '../src/domain/sample';
 import { chainWalls, normalizeCapture, inferConvexFloor } from '../src/domain/native';
 import { normalizeCaptures } from '../src/services/capture';
@@ -98,6 +98,55 @@ describe('room height from a tape', () => {
     expect(fixed.walls[0].height).toBeCloseTo(3.208); expect(fixed.fixtures![0].sill).toBeCloseTo(0.608);
     expect(fixed.openings[0].sill).toBe(0); expect(fixed.openings[0].height).toBeCloseTo(2.108);
     expect(() => setRoomHeight(room, 2.6)).toThrow();
+  });
+});
+
+describe('point dimensions', () => {
+  it('measures a point from both corners, the floor, and the beam above it', () => {
+    const floor = [{x:0,z:0},{x:4,z:0},{x:4,z:3},{x:0,z:3}];
+    const base = parseRoom({...newRoom('Points'), floor, walls: wallsFromFloor(floor, 2.9, 'measured')});
+    // wall 1 runs (0,0)->(4,0) with the room on +z; a 12 cm beam along it hangs to 2.65 m under a 2.88 m ceiling
+    const room = parseRoom({...base, ceiling: {height: 2.88, coverage: 0.9, regions: [{points: [{x:0,z:-0.01},{x:4,z:-0.01},{x:4,z:0.12},{x:0,z:0.12}], height: 2.65, evidence: 'measured'}]},
+      fixtures: [
+        {id: crypto.randomUUID(), wallId: base.walls[0].id, kind: 'switch_board', offset: 1.0, width: 0.22, height: 0.08, sill: 0.607, evidence: 'estimated', tolerance: 0.003},
+        {id: crypto.randomUUID(), wallId: base.walls[1].id, kind: 'water_point', offset: 0.5, width: 0.03, height: 0.03, sill: 0.9, evidence: 'edited'}]});
+    const board = pointDimensions(room, room.fixtures![0])!;
+    expect(board.wall).toBe(1); expect(board.fromStart).toBeCloseTo(1.0); expect(board.fromEnd).toBeCloseTo(2.78);
+    expect(board.bottom).toBeCloseTo(0.607); expect(board.top).toBeCloseTo(0.687); expect(board.overhead).toBe('beam'); expect(board.toCeiling).toBeCloseTo(2.65 - 0.687);
+    const tap = pointDimensions(room, room.fixtures![1])!;
+    expect(tap.overhead).toBe('ceiling'); expect(tap.toCeiling).toBeCloseTo(2.88 - 0.93);
+    const csv = pointsCsv(room).split('\n');
+    expect(csv).toHaveLength(3); expect(csv[1]).toContain('switch board,1,100.0,278.0,60.7'); expect(csv[1]).toContain(',3,'); expect(csv[2]).toContain('water point');
+  });
+});
+
+describe('wall sides, platforms and beams', () => {
+  it('measures a point on a platform from the platform, and its gap to the ceiling from the main floor', () => {
+    const floor = [{x:0,z:0},{x:4,z:0},{x:4,z:3},{x:0,z:3}];
+    const base = parseRoom({...newRoom('Platform'), floor, walls: wallsFromFloor(floor, 2.9, 'measured')});
+    const room = parseRoom({...base, walls: base.walls.map((w, i) => i === 0 ? {...w, baseY: 0.15, height: 2.75} : w), ceiling: {height: 2.9, coverage: 1, regions: []},
+      fixtures: [{id: crypto.randomUUID(), wallId: base.walls[0].id, kind: 'socket', offset: 1, width: 0.08, height: 0.08, sill: 1.0, evidence: 'edited'}]});
+    const d = pointDimensions(room, room.fixtures![0])!;
+    expect(d.bottom).toBeCloseTo(1.0); expect(d.toCeiling).toBeCloseTo(2.9 - 1.23);
+  });
+  it('finds the room side of walls drawn clockwise or counter-clockwise', () => {
+    const ccw = [{x:0,z:0},{x:4,z:0},{x:4,z:3},{x:0,z:3}], cw = [...ccw].reverse();
+    for (const floor of [ccw, cw]) {
+      const room = parseRoom({...newRoom('Side'), floor, walls: wallsFromFloor(floor, 2.7, 'edited')});
+      for (const w of room.walls) {
+        // A point 10 cm to the room side of the wall's middle must be inside the floor.
+        const l = wallLength(w), s = wallInside(room, w), mx = (w.start.x + w.end.x) / 2, mz = (w.start.z + w.end.z) / 2;
+        const p = { x: mx - (w.end.z - w.start.z) / l * 0.1 * s, z: mz + (w.end.x - w.start.x) / l * 0.1 * s };
+        expect(p.x > 0 && p.x < 4 && p.z > 0 && p.z < 3).toBe(true);
+      }
+    }
+  });
+  it('lists a beam on the wall it runs along, not on the wall it only touches at the corner', () => {
+    const floor = [{x:0,z:0},{x:4,z:0},{x:4,z:3},{x:0,z:3}];
+    const base = parseRoom({...newRoom('Beam'), floor, walls: wallsFromFloor(floor, 2.9, 'measured')});
+    const room = parseRoom({...base, ceiling: {height: 2.88, coverage: 1, regions: [{points: [{x:0,z:0},{x:4,z:0},{x:4,z:0.12},{x:0,z:0.12}], height: 2.65, evidence: 'measured'}]}});
+    expect(beamsAlongWall(room, room.walls[0])).toEqual([expect.objectContaining({ height: 2.65 })]);
+    expect(beamsAlongWall(room, room.walls[1])).toHaveLength(0);
   });
 });
 

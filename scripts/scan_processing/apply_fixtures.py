@@ -63,7 +63,9 @@ def main():
             if item.get('review'):
                 entry['review'] = True
             items.append(entry)
-        room['ceiling']['items'] = items
+        # Hanging fixtures found by depth in ceiling.py stay; detected items are added to them.
+        kept = [i for i in room['ceiling'].get('items') or [] if str(i.get('note', '')).startswith('Hanging fixture')]
+        room['ceiling']['items'] = kept + items
     room['updatedAt'] = datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
     Path(sys.argv[3]).write_text(json.dumps(room, indent=2))
     print(f"{room['name']}: {len(fixtures)} wall fixtures and {len(overhead)} ceiling items written to {sys.argv[3]}")

@@ -19,6 +19,7 @@
 .viewport-tools button.with-count{position:relative}.viewport-tools button.with-count b{position:absolute;right:1px;top:0;background:#d9a521;color:#fff;border-radius:8px;font-size:8px;line-height:13px;min-width:13px;padding:0 3px;text-align:center}
 .viewport-card{position:absolute;left:16px;bottom:64px;max-width:min(340px,calc(100% - 32px));display:flex;flex-direction:column;gap:6px;background:#fffffff2;border:1px solid #dce2d2;border-radius:9px;padding:10px 12px;box-shadow:0 3px 20px #6d806018;font-size:11px;color:#3d4a3a}
 .viewport-card.flagged{border-color:#d9a521}
+.viewport-card .kind-choices{flex-wrap:wrap}
 .viewport-card strong{font-weight:600;font-size:12px;color:#26372c}.viewport-card span{color:#7b866f;line-height:1.35}
 .viewport-card div{display:flex;gap:6px;flex-wrap:wrap}
 .viewport-card button{display:flex;align-items:center;gap:5px;border:1px solid #dce2d2;border-radius:6px;background:#fff;padding:6px 9px;font-size:10px;color:#566c41;cursor:pointer}
@@ -29,3 +30,59 @@
 @media (max-width:700px){.viewport{height:64vh;min-height:430px}.viewport-card{left:10px;right:10px;bottom:58px;max-width:none;font-size:10px}.viewport-card span{display:none}.walk-pad{right:auto;left:10px;bottom:auto;top:50%;transform:translateY(-50%);grid-template-columns:repeat(3,34px);grid-template-rows:repeat(2,34px)}.viewport-controls{max-width:calc(100% - 20px)}.viewport-controls button svg{display:none}}
 .display-switch{display:flex;gap:2px;padding-right:6px;margin-right:2px;border-right:1px solid #dce2d2}
 .viewer-note{position:absolute;left:50%;top:16px;transform:translateX(-50%);z-index:3;background:#26372cf0;color:#fff;font-size:11px;padding:7px 11px;border-radius:7px;pointer-events:none;max-width:calc(100% - 32px);text-align:center}
+
+/* Walls view: one wall's elevation with dimensions, and the points table. */
+.walls-view { height: 100%; overflow: auto; padding: 14px 16px 18px; display: flex; flex-direction: column; gap: 12px; background: #fbfbf7; }
+.wall-picker { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.wall-picker button { border: 1px solid #d9dccf; background: #fff; border-radius: 999px; padding: 5px 11px; font-size: 12px; color: #37443a; cursor: pointer; }
+.wall-picker button.active { background: #26372c; color: #fff; border-color: #26372c; }
+.wall-picker .text-button { margin-left: auto; border: none; background: none; display: inline-flex; gap: 5px; align-items: center; }
+.wall-elevation { width: 100%; min-height: 260px; max-height: 52vh; background: #fff; border: 1px solid #e3e5da; border-radius: 12px; }
+.points-table-wrap { overflow-x: auto; }
+.points-table { width: 100%; border-collapse: collapse; font-size: 12.5px; color: #26372c; }
+.points-table th, .points-table td { padding: 6px 8px; border-bottom: 1px solid #ecede4; text-align: right; white-space: nowrap; }
+.points-table th:nth-child(2), .points-table td:nth-child(2) { text-align: left; }
+.points-table th { font-weight: 600; color: #657060; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.points-table tr { cursor: pointer; }
+.points-table tr.selected td { background: #eef4e3; }
+/* The 3D view's floating controls do not apply to the wall drawing. */
+.viewport.walls-mode > .viewport-tag, .viewport.walls-mode > .viewport-controls, .viewport.walls-mode > .viewport-tools,
+.viewport.walls-mode > .viewport-card, .viewport.walls-mode > .orientation { display: none; }
+
+/* Simplified look: one notes block, readable small text, uncluttered phone layout. */
+.scan-notes { margin: 14px 2px 4px; color: #6f7d62; font-size: 12px; }
+.scan-notes summary { display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: 600; color: #5d6c50; list-style: none; }
+.scan-notes summary::-webkit-details-marker { display: none; }
+.scan-notes summary span { font-weight: 400; color: #98a18f; margin-left: 6px; }
+.scan-notes ul { margin: 10px 0 0; padding-left: 22px; line-height: 1.6; color: #7d8a71; }
+.scan-notes li { margin: 4px 0; }
+.scan-notes p { margin: 8px 0 0 23px; color: #98a18f; }
+.room-heading p:empty { display: none; }
+.viewer-footer { font-size: 10.5px; }
+.element-row small, .panel-heading, .inspector-tabs button, .property-section summary, .property-section label { font-size: 10.5px; }
+.element-row, .element-row strong { font-size: 11.5px; }
+.viewport-controls button { font-size: 10.5px; }
+@media (max-width: 700px) {
+  .room-heading { padding: 16px 0 14px; }
+  .room-heading h1 { font-size: 21px; letter-spacing: -.6px; }
+  .room-title > svg { width: 17px; height: 17px; }
+  .room-metrics { gap: 22px; padding-top: 14px; }
+  .room-metrics strong { font-size: 19px; }
+  .room-metrics > div > span { font-size: 9px; }
+  .tabs button { font-size: 11px; }
+  .viewport-tag, .orientation { display: none; }
+  .viewport-controls { bottom: 10px; }
+  .viewport-controls button { font-size: 10.5px; }
+  .viewport-card { bottom: 62px; }
+  .viewer-footer { font-size: 10px; }
+  /* Room details: the list first, its settings underneath. */
+  .inspector { display: block; }
+  .element-list { max-height: 260px; }
+  .property-section { border-left: 0; }
+  .element-row, .element-row strong, .element-row > span:nth-child(2) { font-size: 12px; }
+  .element-row small { font-size: 10px; }
+  .wall-picker .text-button { margin-left: 0; }
+  .wall-elevation { min-height: 200px; }
+  .points-table { font-size: 11.5px; }
+}
+@media (max-width: 700px) { .scan-notes summary span { display: none; } }

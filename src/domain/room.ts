@@ -17,13 +17,15 @@ export const openingSchema = z.object({
 });
 // Things fixed to or cut into a wall, found on scan photos: electrical plates, lights, holes, AC units.
 // Placed like openings: offset along the wall from its start, sill above its base. `depth` is how far a unit stands out from the wall.
-const fixtureKind = z.enum(['switch_board', 'socket', 'switch', 'regulator', 'distribution_box', 'other_electrical', 'light', 'hole', 'ac_unit', 'junction_box']);
+const fixtureKind = z.enum(['switch_board', 'socket', 'switch', 'regulator', 'distribution_box', 'other_electrical', 'light', 'hole', 'ac_unit', 'junction_box', 'water_point', 'drain']);
 export const fixtureSchema = z.object({
   id, wallId: id, kind: fixtureKind,
   offset: number.min(0), width: number.min(0.02).max(2), height: number.min(0.02).max(1), sill: number.min(0).max(10), depth: number.min(0).max(1).optional(),
   evidence: evidenceSchema, confidence: number.min(0).max(1).optional(), review: z.boolean().optional(),
   switches: z.number().int().min(0).max(40).optional(), sockets: z.number().int().min(0).max(40).optional(),
   note: z.string().max(200).optional(),
+  // How far the photos measuring the edges spread, in metres; set only when all four edges were measured on photos.
+  tolerance: number.min(0).max(0.2).optional(),
 });
 // Ceiling measured from scan depth: the main height above the floor plus every region at another height
 // (beams, soffits and lofts below it; coffers and recesses above it).
@@ -62,7 +64,80 @@ export type Opening = Room['openings'][number];
 export type RoomObject = Room['objects'][number];
 export type Fixture = z.infer<typeof fixtureSchema>;
 export const fixtureLabel = (kind: Fixture['kind']) => kind === 'ac_unit' ? 'AC unit' : kind.replace('_', ' ');
+
+// Which side of a wall the room is on, as the sign of the wall's local +Z ((-dz, dx) in plan). Scanned walls are
+// oriented so +Z faces the room. Walls made from a floor outline follow its order, so the outline's winding tells:
+// counter-clockwise (positive area) puts the room on the left of each wall, which is +Z.
+export function wallInside(room: Room, wall: Wall): 1 | -1 {
+  if (room.source === 'roomplan') return 1;
+  if (room.floor.length >= 3) return signedArea(room.floor) >= 0 ? 1 : -1;
+  const ends = room.walls.flatMap(w => [w.start, w.end]), cx = ends.reduce((s, p) => s + p.x, 0) / ends.length, cz = ends.reduce((s, p) => s + p.z, 0) / ends.length;
+  return (cx - wall.start.x) * -(wall.end.z - wall.start.z) + (cz - wall.start.z) * (wall.end.x - wall.start.x) >= 0 ? 1 : -1;
+}
+
+const BEAM_DROP = 0.1;  // a lower region counts as a beam over the wall when it hangs at least this far
+const covers = (points: Point[], p: Point) => { let inside = false; for (let i = 0, j = points.length - 1; i < points.length; j = i++) { const a = points[i], b = points[j]; if ((a.z > p.z) !== (b.z > p.z) && p.x < (b.x - a.x) * (p.z - a.z) / (b.z - a.z) + a.x) inside = !inside; } return inside; };
+/** The underside height of the lowest beam right over a spot on a wall (3 cm out into the room), or undefined. */
+function beamOver(room: Room, wall: Wall, along: number): number | undefined {
+  const ceiling = room.ceiling;
+  if (!ceiling) return undefined;
+  const length = wallLength(wall), dx = (wall.end.x - wall.start.x) / length, dz = (wall.end.z - wall.start.z) / length, out = 0.03 * wallInside(room, wall);
+  const p = { x: wall.start.x + dx * along - dz * out, z: wall.start.z + dz * along + dx * out };
+  const heights = ceiling.regions.filter(r => r.height <= ceiling.height - BEAM_DROP && covers(r.points, p)).map(r => r.height);
+  return heights.length ? Math.min(...heights) : undefined;
+}
+/** Beams running along a wall, as stretches of it (metres from the wall's start) with their underside height. */
+export function beamsAlongWall(room: Room, wall: Wall): { from: number; to: number; height: number }[] {
+  const length = wallLength(wall), step = 0.05, runs: { from: number; to: number; height: number }[] = [];
+  for (let along = step / 2; along < length; along += step) {
+    const height = beamOver(room, wall, along), last = runs.at(-1);
+    if (height === undefined) continue;
+    if (last && Math.abs(last.height - height) < 0.02 && along - last.to <= step * 1.5) last.to = Math.min(length, along + step / 2);
+    else runs.push({ from: Math.max(0, along - step / 2), to: Math.min(length, along + step / 2), height });
+  }
+  // The end of the next wall's beam only touches this one at the corner.
+  return runs.filter(r => r.to - r.from >= Math.min(0.5, length / 2));
+}
+
+// Everything an electrician, plumber or carpenter needs for one point on a wall: distances from both corners of the
+// wall, heights from the floor right under it (a wall on a step or platform has its own floor level), the gap to the
+// ceiling or the beam above it, and its size.
+export type PointDimensions = { wall: number; fromStart: number; fromEnd: number; bottom: number; centre: number; top: number; toCeiling: number | null; overhead: 'ceiling' | 'beam' | null; width: number; height: number; tolerance?: number };
+export function pointDimensions(room: Room, fixture: Fixture): PointDimensions | null {
+  const index = room.walls.findIndex(w => w.id === fixture.wallId);
+  if (index < 0) return null;
+  const wall = room.walls[index], length = wallLength(wall);
+  const beam = beamOver(room, wall, fixture.offset + fixture.width / 2), overheadHeight = beam ?? room.ceiling?.height;
+  // Ceiling heights are from the room's main floor; the point's top is too once the wall's own floor level is added.
+  const topAboveMainFloor = wall.baseY + fixture.sill + fixture.height;
+  return { wall: index + 1, fromStart: fixture.offset, fromEnd: length - fixture.offset - fixture.width,
+    bottom: fixture.sill, centre: fixture.sill + fixture.height / 2, top: fixture.sill + fixture.height,
+    toCeiling: overheadHeight === undefined ? null : overheadHeight - topAboveMainFloor, overhead: overheadHeight === undefined ? null : beam !== undefined ? 'beam' : 'ceiling',
+    width: fixture.width, height: fixture.height, ...(fixture.tolerance !== undefined ? { tolerance: fixture.tolerance } : {}) };
+}
+// The points of a room as CSV (centimetres), for a spreadsheet.
+export function pointsCsv(room: Room): string {
+  const cm = (v: number | null | undefined) => v === null || v === undefined ? '' : (v * 100).toFixed(1);
+  const rows = [['Point', 'Kind', 'Wall', 'From wall start (cm)', 'From wall end (cm)', 'Bottom above floor (cm)', 'Centre above floor (cm)', 'Top above floor (cm)', 'Gap to ceiling or beam (cm)', 'Above it', 'Width (cm)', 'Height (cm)', 'Within (± mm)', 'Check', 'Note']];
+  (room.fixtures ?? []).forEach((f, i) => {
+    const d = pointDimensions(room, f);
+    if (!d) return;
+    rows.push([String(i + 1), fixtureLabel(f.kind), String(d.wall), cm(d.fromStart), cm(d.fromEnd), cm(d.bottom), cm(d.centre), cm(d.top), cm(d.toCeiling), d.overhead ?? '', cm(d.width), cm(d.height),
+      d.tolerance !== undefined ? (d.tolerance * 1000).toFixed(0) : '', f.review ? 'yes' : '', (f.note ?? '').replace(/\s+/g, ' ')]);
+  });
+  return rows.map(r => r.map(v => /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v).join(',')).join('\n');
+}
 export type Evidence = z.infer<typeof evidenceSchema>;
+
+// Something the scan missed, drawn by hand as a box on a wall: a door, window or opening, or a fixture on the wall.
+export type DrawnKind = 'window' | 'door' | 'opening' | Fixture['kind'];
+export function addDrawn(room: Room, box: { wallId: string; offset: number; sill: number; width: number; height: number }, kind: DrawnKind): { room: Room; id: string } {
+  const id = crypto.randomUUID(), round = (v: number) => Math.round(v * 1000) / 1000;
+  const placed = { id, wallId: box.wallId, offset: round(box.offset), width: round(box.width), height: round(box.height), sill: round(box.sill), evidence: 'edited' as const };
+  if (kind === 'window' || kind === 'door' || kind === 'opening') return { room: { ...room, openings: [...room.openings, { ...placed, kind }] }, id };
+  if (placed.width > 2 || placed.height > 1) throw new Error('A wall fixture is at most 2 m wide and 1 m tall; draw a smaller box.');
+  return { room: { ...room, fixtures: [...(room.fixtures ?? []), { ...placed, kind, note: 'Drawn by hand on the scan.' }] }, id };
+}
 
 // One line saying what an element is and its key dimension, for tooltips and the selection card.
 export function describeElement(room: Room, id: string): string {
