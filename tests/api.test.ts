@@ -18,10 +18,10 @@ describe('room sync API',()=>{
     expect((await request(app).options('/api/rooms').set('Origin','capacitor://localhost')).status).toBe(204);
   });
   it('round-trips measurements, strips device paths and prevents stale overwrites',async()=>{
-    const app=server(),room={...newRoom('Measured room'),originalUsdzPath:'/private/device/file.usdz'};
+    const app=server(),room={...newRoom('Measured room'),originalUsdzPath:'/private/device/file.usdz',measurementQuality:{version:'geometry-qa-v1',status:'needs-rescan',targetMeters:.02,reasons:['Repeat views disagree'],applied:[]}};
     expect((await request(app).put(`/api/rooms/${room.id}`).send({room,revision:0})).body.revision).toBe(1);
     const loaded=await request(app).get(`/api/rooms/${room.id}`);
-    expect(loaded.body.room.name).toBe(room.name); expect(loaded.body.room.originalUsdzPath).toBeUndefined();
+    expect(loaded.body.room.measurementQuality).toEqual(room.measurementQuality); expect(loaded.body.room.name).toBe(room.name); expect(loaded.body.room.originalUsdzPath).toBeUndefined();
     expect((await request(app).put(`/api/rooms/${room.id}`).send({room:{...room,name:'Stale'},revision:0})).status).toBe(409);
     expect((await request(app).get(`/api/rooms/${room.id}`)).body.room.name).toBe(room.name);
     expect((await request(app).put(`/api/rooms/${room.id}`).send({room:{...room,name:'Updated'},revision:1})).body.revision).toBe(2);

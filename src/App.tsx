@@ -39,7 +39,9 @@ export default function App() {
   useEffect(() => { const handler = (e: BeforeUnloadEvent) => { if (dirty) e.preventDefault(); }; window.addEventListener('beforeunload', handler); return () => window.removeEventListener('beforeunload', handler); }, [dirty]);
   const error = (message: string) => setNotice({ text: message, error: true });
   const change = (next: Room) => {
-    try { const valid = parseRoom({ ...next, updatedAt: new Date().toISOString() }); setHistory(h => [...h.slice(-29), room]); setRoom(valid); setDirty(true); setNotice(null); return true; }
+    const geometryChanged = JSON.stringify([next.floor, next.walls, next.ceiling]) !== JSON.stringify([room.floor, room.walls, room.ceiling]);
+    const measurementQuality = geometryChanged && next.measurementQuality ? { ...next.measurementQuality, status: 'needs-rescan' as const, reasons: ['Geometry edited after validation. Recheck dimensions.'], applied: [] } : next.measurementQuality;
+    try { const valid = parseRoom({ ...next, measurementQuality, updatedAt: new Date().toISOString() }); setHistory(h => [...h.slice(-29), room]); setRoom(valid); setDirty(true); setNotice(null); return true; }
     catch (e) { error(e instanceof Error ? (e.message.startsWith('[') ? 'Please check your values. Some dimensions are outside the supported range.' : e.message) : 'Invalid room.'); return false; }
   };
   const save = useCallback(async () => {
@@ -157,6 +159,7 @@ export default function App() {
           {view === '3d' && camera === 'inside' ? <div className="walk-pad" aria-label="Walk">{([['ArrowUp', ArrowUp, 'forward'], ['ArrowLeft', ArrowLeft, 'left'], ['ArrowDown', ArrowDown, 'back'], ['ArrowRight', ArrowRight, 'right']] as const).map(([key, Icon, name]) => <button key={key} className={name} aria-label={`Walk ${name}`} onPointerDown={() => walkStart(key)} onPointerUp={walkStop} onPointerLeave={walkStop} onPointerCancel={walkStop}><Icon size={18} /></button>)}</div> : null}
           <div className="orientation" title="Model axis, not compass north"><span>−Z</span><div>↑</div></div>
         </div><div className="viewer-footer"><span><span className="status-dot" />{view === '3d' ? '' + (marking ? 'Drag on a wall to draw a box around something the scan missed; the LiDAR scan view shows the real colours' : measure ? 'Click two points to measure the distance between them' : camera === 'inside' ? 'Drag to look around · Arrow keys or double-click the floor to walk · Scroll to zoom the lens' : 'Drag to orbit · Scroll to zoom · Right-drag or two fingers to pan · Double-click to move in') : view === 'walls' ? 'Pick a wall · tap a point to select it · all values in cm, heights from the floor' : 'Tap a wall to select it'}</span></div>
+        {room.measurementQuality ? <div className="review-note" role="status"><Ruler size={18} /><div><strong>{room.measurementQuality.status === 'needs-rescan' ? '2 cm accuracy not verified · rescan needed' : 'Repeat views consistent · absolute accuracy unverified'}</strong><p>{room.measurementQuality.reasons.join('. ')}</p></div></div> : null}
         {room.source === 'sample' ? <div className="review-note"><Ruler size={18} /><div><strong>A starting point, not a measurement</strong><p>This sample lets you try editing and exporting before your first scan.</p></div></div>
           : <details className="scan-notes"><summary><Ruler size={15} />Scan notes{room.warnings.length ? ` · ${room.warnings.length}` : ''}<span>Check key dimensions with a tape before building</span></summary>
             {room.warnings.length ? <ul>{room.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul> : <p>No notes for this room.</p>}</details>}

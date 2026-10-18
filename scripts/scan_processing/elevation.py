@@ -411,7 +411,7 @@ def natural_crop(surface: Wall, frame, center, size, pixels=700):
     return cv2.warpAffine(frame['image'], transform, (pixels, pixels), flags=cv2.INTER_CUBIC, borderValue=(40, 40, 40))
 
 
-def depth_points(raw: Path, max_range=4.5, with_frames=False):
+def depth_points(raw: Path, max_range=4.5, with_frames=False, min_confidence=1):
     """Every confident LiDAR depth sample of a scan as world-space points with surface normals facing the camera.
 
     With `with_frames`, also returns each point's frame number in capture order."""
@@ -435,10 +435,13 @@ def depth_points(raw: Path, max_range=4.5, with_frames=False):
         normal /= np.maximum(np.linalg.norm(normal, axis=-1, keepdims=True), 1e-9)
         normal[np.sum(normal * camera, axis=-1) > 0] *= -1
         pose = matrix(f['cameraToWorld'])
-        keep = (confidence >= 1) & (depth > 0.3) & (depth < max_range)
+        keep = (confidence >= min_confidence) & np.isfinite(depth) & (depth > 0.3) & (depth < max_range)
         points.append((camera @ pose[:3, :3].T + pose[:3, 3])[keep])
         normals.append((normal @ pose[:3, :3].T)[keep])
         order.append(np.full(int(keep.sum()), len(order), np.int32))
+    if not points:
+        empty = np.empty((0, 3))
+        return (empty, empty.copy(), np.empty(0, dtype=np.int32)) if with_frames else (empty, empty.copy())
     if with_frames:
         return np.concatenate(points), np.concatenate(normals), np.concatenate(order)
     return np.concatenate(points), np.concatenate(normals)

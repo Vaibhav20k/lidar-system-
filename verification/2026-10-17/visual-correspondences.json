@@ -1,0 +1,90 @@
+[
+  {
+    "a": 12,
+    "b": 18,
+    "matches": 31,
+    "inliers": 17,
+    "holdoutBeforePixels": 10.65810235340313,
+    "holdoutAfterPixels": 0.45871149039042614,
+    "pointDisagreementCm": 4.980540982745376,
+    "poseTranslationCm": 3.3550351014532174,
+    "poseRotationDegrees": 0.42219388754381404
+  },
+  {
+    "a": 12,
+    "b": 210,
+    "matches": 51,
+    "inliers": 25,
+    "holdoutBeforePixels": 23.45439277887767,
+    "holdoutAfterPixels": 1.1003312834595744,
+    "pointDisagreementCm": 6.345579636247867,
+    "poseTranslationCm": 4.481404068771749,
+    "poseRotationDegrees": 1.3261334286014803
+  },
+  {
+    "a": 48,
+    "b": 54,
+    "matches": 41,
+    "inliers": 23,
+    "holdoutBeforePixels": 6.803718561940989,
+    "holdoutAfterPixels": 0.7875241227537415,
+    "pointDisagreementCm": 4.5447068871115865,
+    "poseTranslationCm": 3.888663020911299,
+    "poseRotationDegrees": 0.3886275711282687
+  },
+  {
+    "a": 66,
+    "b": 72,
+    "matches": 32,
+    "inliers": 16,
+    "holdoutBeforePixels": 14.742400593702936,
+    "holdoutAfterPixels": 1.1024195707660167,
+    "pointDisagreementCm": 7.10541912025856,
+    "poseTranslationCm": 8.0228783615328,
+    "poseRotationDegrees": 0.5526505688975951
+  },
+  {
+    "a": 126,
+    "b": 132,
+    "matches": 27,
+    "inliers": 14,
+    "holdoutBeforePixels": 8.514576574856875,
+    "holdoutAfterPixels": 0.6088615375686138,
+    "pointDisagreementCm": 5.286903971579069,
+    "poseTranslationCm": 3.0511986023251194,
+    "poseRotationDegrees": 0.8777677089035298
+  },
+  {
+    "a": 222,
+    "b": 228,
+    "matches": 53,
+    "inliers": 34,
+    "holdoutBeforePixels": 2.7260756464924167,
+    "holdoutAfterPixels": 0.45788069237561135,
+    "pointDisagreementCm": 6.657150064138939,
+    "poseTranslationCm": 3.6765654184033187,
+    "poseRotationDegrees": 0.7597315793598107
+  },
+  {
+    "a": 228,
+    "b": 240,
+    "matches": 28,
+    "inliers": 14,
+    "holdoutBeforePixels": 7.566555648308441,
+    "holdoutAfterPixels": 2.773268294760121,
+    "pointDisagreementCm": 3.04761384320075,
+    "poseTranslationCm": 3.247483694356492,
+    "poseRotationDegrees": 0.40374545154764835
+  },
+  {
+    "a": 336,
+    "b": 342,
+    "matches": 33,
+    "inliers": 22,
+    "holdoutBeforePixels": 10.24626905020599,
+    "holdoutAfterPixels": 0.3558471845342534,
+    "pointDisagreementCm": 4.444356822262952,
+    "poseTranslationCm": 4.000036248304252,
+    "poseRotationDegrees": 0.5089939048079596
+  }
+]

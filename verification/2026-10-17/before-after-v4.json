@@ -1,0 +1,228 @@
+[
+  {
+    "id": "7D9B772D-66FE-462C-AEA2-2B0A3E57CAB5",
+    "time": "17:32",
+    "group": "same-room",
+    "dimensions": {
+      "length": {
+        "reference_m": 6.423,
+        "before_m": 6.309010710721582,
+        "after_m": 6.309010710721582,
+        "before_error_cm": -11.398928927841823,
+        "after_error_cm": -11.398928927841823,
+        "within_2cm": false
+      },
+      "width": {
+        "reference_m": 4.57,
+        "before_m": 4.56260834936703,
+        "after_m": 4.56260834936703,
+        "before_error_cm": -0.7391650632969871,
+        "after_error_cm": -0.7391650632969871,
+        "within_2cm": true
+      },
+      "height": {
+        "reference_m": 3.226,
+        "before_m": 3.284,
+        "after_m": 3.279,
+        "before_error_cm": 5.799999999999983,
+        "after_error_cm": 5.299999999999994,
+        "within_2cm": false
+      }
+    },
+    "quality": {
+      "version": "geometry-qa-v1",
+      "status": "needs-rescan",
+      "targetMeters": 0.02,
+      "reasons": [
+        "4 wall fits unsupported; footprint correction withheld",
+        "floor: insufficient coverage or surface is not level within 2 cm",
+        "ceiling: insufficient coverage or surface is not level within 2 cm",
+        "Weak mapping in 137/360 recorded frames; normal tracking does not certify metric accuracy",
+        "Raw depth cap reached before scan end; final revisit coverage may be incomplete",
+        "Beam levels and absolute accuracy require independent measurement"
+      ],
+      "applied": []
+    },
+    "nativeCeilingReplaySeconds": 6.802897118999681
+  },
+  {
+    "id": "E5E54DAD-2A4D-4718-ADCB-8C4A7A22A6F7",
+    "time": "15:39",
+    "group": "same-room",
+    "dimensions": {
+      "length": {
+        "reference_m": 6.423,
+        "before_m": 6.355654029241904,
+        "after_m": 6.355654029241904,
+        "before_error_cm": -6.7345970758095675,
+        "after_error_cm": -6.7345970758095675,
+        "within_2cm": false
+      },
+      "width": {
+        "reference_m": 4.57,
+        "before_m": 4.630736706266938,
+        "after_m": 4.630736706266938,
+        "before_error_cm": 6.073670626693772,
+        "after_error_cm": 6.073670626693772,
+        "within_2cm": false
+      },
+      "height": {
+        "reference_m": 3.226,
+        "before_m": 3.184,
+        "after_m": 3.178,
+        "before_error_cm": -4.1999999999999815,
+        "after_error_cm": -4.800000000000004,
+        "within_2cm": false
+      }
+    },
+    "quality": {
+      "version": "geometry-qa-v1",
+      "status": "needs-rescan",
+      "targetMeters": 0.02,
+      "reasons": [
+        "6 wall fits unsupported; footprint correction withheld",
+        "floor: insufficient coverage or surface is not level within 2 cm",
+        "ceiling: insufficient coverage or surface is not level within 2 cm",
+        "Tracking history unavailable in this capture",
+        "Beam levels and absolute accuracy require independent measurement"
+      ],
+      "applied": []
+    },
+    "nativeCeilingReplaySeconds": 1.4565944970017881
+  },
+  {
+    "id": "045BFE29-E2F5-47E0-B0AE-81CCF669CC5E",
+    "time": "16:48",
+    "group": "same-room",
+    "dimensions": {
+      "length": {
+        "reference_m": 6.423,
+        "before_m": 6.475849734779638,
+        "after_m": 6.475849734779638,
+        "before_error_cm": 5.284973477963817,
+        "after_error_cm": 5.284973477963817,
+        "within_2cm": false
+      },
+      "width": {
+        "reference_m": 4.57,
+        "before_m": 4.425645118317714,
+        "after_m": 4.425645118317714,
+        "before_error_cm": -14.435488168228616,
+        "after_error_cm": -14.435488168228616,
+        "within_2cm": false
+      },
+      "height": {
+        "reference_m": 3.226,
+        "before_m": 3.278,
+        "after_m": 3.271,
+        "before_error_cm": 5.200000000000005,
+        "after_error_cm": 4.499999999999993,
+        "within_2cm": false
+      }
+    },
+    "quality": {
+      "version": "geometry-qa-v1",
+      "status": "needs-rescan",
+      "targetMeters": 0.02,
+      "reasons": [
+        "6 wall fits unsupported; footprint correction withheld",
+        "floor: insufficient coverage or surface is not level within 2 cm",
+        "ceiling: insufficient coverage or surface is not level within 2 cm",
+        "Tracking history unavailable in this capture",
+        "Beam levels and absolute accuracy require independent measurement"
+      ],
+      "applied": []
+    },
+    "nativeCeilingReplaySeconds": 1.504353483000159
+  },
+  {
+    "id": "03D3CDA8-BB44-4C2F-8778-C031E0D5590B",
+    "time": "16:50",
+    "group": "same-room",
+    "dimensions": {
+      "length": {
+        "reference_m": 6.423,
+        "before_m": 6.488115640414113,
+        "after_m": 6.488115640414113,
+        "before_error_cm": 6.511564041411333,
+        "after_error_cm": 6.511564041411333,
+        "within_2cm": false
+      },
+      "width": {
+        "reference_m": 4.57,
+        "before_m": 4.58654823467047,
+        "after_m": 4.58654823467047,
+        "before_error_cm": 1.6548234670469952,
+        "after_error_cm": 1.6548234670469952,
+        "within_2cm": true
+      },
+      "height": {
+        "reference_m": 3.226,
+        "before_m": 3.183,
+        "after_m": 3.18,
+        "before_error_cm": -4.300000000000015,
+        "after_error_cm": -4.599999999999982,
+        "within_2cm": false
+      }
+    },
+    "quality": {
+      "version": "geometry-qa-v1",
+      "status": "needs-rescan",
+      "targetMeters": 0.02,
+      "reasons": [
+        "6 wall fits unsupported; footprint correction withheld",
+        "floor: held-out views disagree",
+        "ceiling: insufficient coverage or surface is not level within 2 cm",
+        "Tracking history unavailable in this capture",
+        "Beam levels and absolute accuracy require independent measurement"
+      ],
+      "applied": []
+    },
+    "nativeCeilingReplaySeconds": 0.9560703679999278
+  },
+  {
+    "id": "80F17D3B-8897-4652-9969-9C85580A612B",
+    "time": "15:28",
+    "group": "other-room",
+    "dimensions": {
+      "length": {
+        "reference_m": 4.939,
+        "before_m": 4.888986103641908,
+        "after_m": 4.888986103641908,
+        "before_error_cm": -5.001389635809161,
+        "after_error_cm": -5.001389635809161,
+        "within_2cm": false
+      },
+      "width": {
+        "reference_m": 4.295,
+        "before_m": 4.266933522623981,
+        "after_m": 4.266933522623981,
+        "before_error_cm": -2.806647737601864,
+        "after_error_cm": -2.806647737601864,
+        "within_2cm": false
+      },
+      "height": {
+        "reference_m": 3.23,
+        "before_m": 3.233,
+        "after_m": 3.23,
+        "before_error_cm": 0.30000000000001137,
+        "after_error_cm": 0.0,
+        "within_2cm": true
+      }
+    },
+    "quality": {
+      "version": "geometry-qa-v1",
+      "status": "needs-rescan",
+      "targetMeters": 0.02,
+      "reasons": [
+        "6 wall fits unsupported; footprint correction withheld",
+        "floor: held-out views disagree",
+        "ceiling: insufficient coverage or surface is not level within 2 cm",
+        "Tracking history unavailable in this capture",
+        "Beam levels and absolute accuracy require independent measurement"
+      ],
+      "applied": []
+    },
+    "nativeCeilingReplaySeconds": 1.4664060640025127
+  }
+]

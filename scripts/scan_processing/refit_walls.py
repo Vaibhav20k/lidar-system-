@@ -2,14 +2,13 @@
 
 Usage: refit_walls.py <capture.json> <raw-bundle-dir> <room.json> <out-room.json>
 
-RoomPlan squares every corner to exactly 90 degrees. Real rooms are 0.2-3 degrees out of square, so along a
-4-5 m wall its corners can be 4-11 cm from the real ones. For each wall this script:
+RoomPlan's parametric surfaces are candidates, not surveyed boundaries. For each wall this script:
   1. takes the LiDAR points near RoomPlan's wall plane that face into the room, leaving out doors and windows;
   2. on each 50 cm stretch, finds the back-most surface with real support, band by band between 0.3 and 1.9 m
      (whiteboards, panels and cabinets hang in front of a wall, never behind it, and rarely cover it top to bottom), drops stretches that disagree with the rest, and fits a vertical
      plane through the others, letting it shift and turn a little;
   3. checks that small patches of the wall seen early and late in the scan agree, and keeps RoomPlan's line if
-     they do not (the phone's tracking slipped, and the slip would be copied into the room);
+     they do not (tracking, depth errors, clutter and different surface layers can all cause disagreement);
   4. moves each corner to where the fitted planes of the two walls meeting there cross.
 A wall seen too little keeps RoomPlan's line; a corner that would move implausibly far keeps RoomPlan's corner.
 Doors, windows and electrical fixtures keep their place in the room; their offsets along the wall are recomputed.
@@ -22,6 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from elevation import Wall, depth_points
+from quality import repeat_view_check, robust_plane
 
 NEAR = 0.15           # points this close to RoomPlan's plane can belong to the wall
 LAYER = 0.02          # points this close to the fitted plane count as the wall surface
@@ -40,8 +40,6 @@ AGREE = 0.015         # stretches whose wall position is further than this from 
 MIN_AGREEING = 0.6    # at least this share of a wall's stretches must agree
 MIN_TURN_SPAN = 1.5   # a wall seen along less than this may shift but not turn
 MIN_TURN_STRETCHES = 5   # nor one with fewer agreeing stretches than this
-CELL = 0.25           # wall patch size for the tracking check
-MAX_SLIP = 0.025      # patches seen early and late in the scan must agree within this (90% of them)
 MIN_CORNER_ANGLE = np.radians(20)  # walls meeting flatter than this do not give a reliable crossing
 
 
@@ -118,7 +116,7 @@ def fit_wall(wall: Wall, points, normals, frames, floor_y, openings):
     rel = points - wall.origin
     across, along, up = rel @ wall.inward, rel @ wall.axis_x + wall.width / 2, rel @ wall.axis_y
     height = points[:, 1] - floor_y
-    near = ((np.abs(across) < NEAR) & (along > 0) & (along < wall.width) & (normals @ wall.inward > FACING)
+    near = ((np.abs(across) < 2 * NEAR) & (along > 0) & (along < wall.width) & (normals @ wall.inward > FACING)
             & (height > TAPE_LOW) & (height < min(TAPE_HIGH + BAND, wall.height - 0.15)) & (np.abs(up) < wall.height / 2))
     # Through a door or window the camera sees whatever is beyond it.
     for o in openings:
@@ -126,27 +124,28 @@ def fit_wall(wall: Wall, points, normals, frames, floor_y, openings):
     if near.sum() < MIN_POINTS:
         return None, f'{near.sum()} points'
     a, d, h, seen_at = along[near], across[near], height[near], frames[near]
-    slope, offset, info = fit_line(wall, a, d, h)
+    # Do not select a depth mode before QA: that can hide an entire shifted visit.
+    repeat = repeat_view_check(a, d, h, seen_at, wall.width)
+    if not repeat['passed']:
+        detail = f" ({repeat['shift'] * 100:.1f} cm P90 surface disagreement; not a pose-drift estimate)" if 'shift' in repeat else ''
+        return None, repeat['reason'] + detail
+    near_layer = abs(d) < NEAR
+    slope, offset, info = fit_line(wall, a[near_layer], d[near_layer], h[near_layer])
     if slope is None:
         return None, offset
-    # Tracking check: small patches of the wall seen both early and late in the scan must agree. If the phone's
-    # tracking slipped between visits, the patches disagree and the slip would be copied into the room.
-    slips = []
-    for s0 in np.arange(0, wall.width, CELL):
-        for b0 in np.arange(0.15, wall.height, CELL):
-            cell = (a >= s0) & (a < s0 + CELL) & (h >= b0) & (h < b0 + CELL)
-            if cell.sum() < 200:
-                continue
-            hist, edges = np.histogram(d[cell], bins=np.arange(-NEAR, NEAR + 0.005, 0.005))
-            on = cell & (np.abs(d - (edges[hist.argmax()] + 0.0025)) < 0.02)
-            middle = np.median(seen_at[on])
-            early, late = on & (seen_at <= middle), on & (seen_at > middle)
-            if early.sum() >= 40 and late.sum() >= 40:
-                slips.append(abs(np.median(d[late]) - np.median(d[early])))
-    if len(slips) >= 5:
-        info['slip'] = float(np.percentile(slips, 90))
-        if info['slip'] > MAX_SLIP:
-            return None, f'seen {info["slip"] * 100:.1f} cm apart early and late in the scan (tracking slipped)'
+    # Equal frame/cell representation and whole held-out frames, independent of
+    # the narrow fitted layer. Clutter/ambiguous layers must fail, not certify.
+    validation = robust_plane(np.column_stack([a, h, d]), seen_at)
+    if not validation['passed']:
+        return None, validation['reason']
+    bx, by, bz = validation['coefficients']
+    if abs(by) * wall.height > .01:
+        return None, 'wall is not supported as a vertical plane'
+    offset = bz - bx * validation['origin'][0]
+    slope = bx
+    if abs(np.arctan(slope)) > MAX_TURN:
+        return None, 'validated wall turns more than 3 degrees'
+    info.update(slip=repeat['shift'], repeat=repeat, validation=validation)
     flat = lambda v: np.array([v[0], v[2]])
     direction = flat(wall.axis_x) + slope * flat(wall.inward)
     start = flat(wall.origin) - flat(wall.axis_x) * wall.width / 2
@@ -176,7 +175,7 @@ def main():
         if scan is None or abs(w['start']['x'] - start[0]) > 0.02 or abs(w['start']['z'] - start[2]) > 0.02:
             raise SystemExit('This room file no longer matches its scan (edited or rescaled). Refit the walls on the unedited room.')
 
-    points, normals, frames = depth_points(raw, with_frames=True)
+    points, normals, frames = depth_points(raw, with_frames=True, min_confidence=2)
     lines, kept = {}, []
     for w in room['walls']:
         fitted, reason = fit_wall(scan_walls[w['id']], points, normals, frames, floor_y, [o for o in room.get('openings', []) if o['wallId'] == w['id']])

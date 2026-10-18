@@ -37,8 +37,6 @@ export function mountScans(app: express.Express, dataDirectory: string) {
   const python = process.env.ROOMFORM_PYTHON || 'python3';
   // Looking for fixtures sends wall and ceiling photos to OpenRouter and costs money, so it must be switched on deliberately.
   const detect = process.env.ROOMFORM_DETECT === '1' && Boolean(process.env.OPENROUTER_API_KEY);
-  // Walls fitted to LiDAR replace RoomPlan's squared corners; ROOMFORM_REFIT_WALLS=0 keeps RoomPlan's walls.
-  const refitWalls = process.env.ROOMFORM_REFIT_WALLS !== '0';
   const jobs = new Map<string, Job>();
   mkdirSync(root, { recursive: true });
 
@@ -70,16 +68,13 @@ export function mountScans(app: express.Express, dataDirectory: string) {
     try { room = parseRoom(req.body?.room); } catch { res.status(400).json({ error: 'Invalid room.' }); return; }
     if (!req.body?.capture || typeof req.body.capture !== 'object') { res.status(400).json({ error: 'The capture is missing.' }); return; }
     if (jobs.get(id)?.status === 'processing') { res.status(202).json({ status: 'processing' }); return; }
-    const capture = join(folder, 'capture.json'), plain = join(folder, 'room.json'), withCeiling = join(folder, 'room-ceiling.json'), refitted = join(folder, 'room-refit.json'), full = join(folder, 'room-full.json'), found = join(folder, 'detect'), walled = join(folder, 'room-walls.json'), levelled = join(folder, 'room-floor.json'), refined = join(folder, 'room-refined.json');
+    const capture = join(folder, 'capture.json'), plain = join(folder, 'room.json'), withCeiling = join(folder, 'room-ceiling.json'), refitted = join(folder, 'room-refit.json'), full = join(folder, 'room-full.json'), found = join(folder, 'detect'), refined = join(folder, 'room-refined.json');
     writeFileSync(capture, JSON.stringify(req.body.capture)); writeFileSync(plain, JSON.stringify({ ...room, originalUsdzPath: undefined }));
-    const job: Job = { status: 'processing', stage: 'Measuring the ceiling', notes: [] };
+    const job: Job = { status: 'processing', stage: 'Checking repeated views and fitting geometry', notes: [] };
     jobs.set(id, job);
     res.status(202).json({ status: 'processing' });
     void (async () => {
-      let latest = plain, measuredCeiling = false;
-      // A ceiling that cannot be measured must not stop the rest: the room is still usable without it.
-      try { await run(python, [join(scripts, 'ceiling.py'), capture, bundle, plain, withCeiling]); latest = withCeiling; measuredCeiling = true; job.notes.push('Ceiling measured from depth.'); }
-      catch (e) { job.notes.push(`Ceiling not measured: ${e instanceof Error ? e.message : 'unknown error'}`); }
+      let latest = plain;
       // RoomPlan's furniture boxes run wide; pull broad-fronted furniture in to the edges seen on the photos.
       job.stage = 'Fitting furniture to its real edges';
       try { await run(python, [join(scripts, 'refit_objects.py'), capture, bundle, latest, refitted]); latest = refitted; job.notes.push('Furniture fronts fitted to photo edges.'); }
@@ -87,8 +82,9 @@ export function mountScans(app: express.Express, dataDirectory: string) {
       if (detect) {
         job.stage = 'Looking for switches, lights, holes and AC units';
         try {
-          // The ceiling is searched for lights and holes only when it was measured.
-          await run(python, [join(scripts, 'detect.py'), capture, bundle, found, ...(measuredCeiling ? ['--room', withCeiling] : [])]);
+          // Geometry runs last because photo projections use the original capture datum.
+          // Ceiling detection is withheld until a validated ceiling exists in that datum.
+          await run(python, [join(scripts, 'detect.py'), capture, bundle, found]);
           await run(python, [join(scripts, 'apply_fixtures.py'), latest, join(found, 'fixtures.json'), full]);
           latest = full; job.notes.push('Fixtures found on scan photos.');
           // The detector's boxes are a little loose; measure the plates' real edges on the photos.
@@ -96,20 +92,24 @@ export function mountScans(app: express.Express, dataDirectory: string) {
           catch (e) { job.notes.push(`Plate edges not measured: ${e instanceof Error ? e.message : 'unknown error'}`); }
         } catch (e) { job.notes.push(`Fixtures not detected: ${e instanceof Error ? e.message : 'unknown error'}`); }
       } else job.notes.push('Fixture detection is switched off on this server.');
-      // These two change the walls and heights the steps above measured against, so they run last.
-      if (refitWalls) {
-        job.stage = 'Fitting walls and corners to the scan';
-        try { await run(python, [join(scripts, 'refit_walls.py'), capture, bundle, latest, walled]); latest = walled; job.notes.push('Walls and corners fitted to LiDAR.'); }
-        catch (e) { job.notes.push(`Walls not refitted: ${e instanceof Error ? e.message : 'unknown error'}`); }
+      job.stage = 'Checking repeated views and fitting geometry';
+      // No unvalidated floor/ceiling/wall correction is applied. Geometry QA is
+      // entirely local and never uses fixture detection or tape targets.
+      try {
+        await run(python, [join(scripts, 'geometry.py'), capture, bundle, latest, withCeiling, '--report', join(folder, 'geometry-quality.json')]);
+        latest = withCeiling;
+        job.notes.push('Geometry checked against repeat and held-out views; review accuracy status.');
+      } catch (e) {
+        const fallback = { ...JSON.parse(readFileSync(latest, 'utf8')), measurementQuality: { version: 'geometry-qa-v1', status: 'needs-rescan', targetMeters: .02,
+          reasons: ['Geometry quality check could not complete. Accuracy is not verified.'], applied: [] } };
+        writeFileSync(plain, JSON.stringify(fallback)); latest = plain;
+        job.notes.push(`Geometry not refined: ${e instanceof Error ? e.message : 'unknown error'}`);
       }
-      job.stage = 'Measuring heights from the real floor';
-      try { await run(python, [join(scripts, 'floor_level.py'), capture, bundle, latest, levelled]); latest = levelled; job.notes.push('Heights measured from the LiDAR floor.'); }
-      catch (e) { job.notes.push(`Floor not measured: ${e instanceof Error ? e.message : 'unknown error'}`); }
       try {
         // Keep the phone's own identity and timestamps; take only what the scripts added.
         const result = parseRoom(JSON.parse(readFileSync(latest, 'utf8')));
         job.room = parseRoom({ ...room, originalUsdzPath: undefined, walls: result.walls, floor: result.floor, openings: result.openings, objects: result.objects,
-          ceiling: result.ceiling, fixtures: result.fixtures, warnings: result.warnings, updatedAt: new Date().toISOString() });
+          measurementQuality: result.measurementQuality, ceiling: result.ceiling, fixtures: result.fixtures, warnings: result.warnings, updatedAt: new Date().toISOString() });
         job.status = 'done'; job.stage = 'Done';
       } catch { job.status = 'failed'; job.error = 'The processed room was not valid.'; }
     })();

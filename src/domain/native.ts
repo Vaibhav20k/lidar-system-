@@ -7,7 +7,7 @@ export const captureSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('roomplan'), walls: z.array(surface).min(3).max(128), openings: z.array(surface.extend({ kind: z.enum(['door', 'window', 'opening']) })).max(128), objects: z.array(surface.extend({ category: z.string().max(50), attributes: z.record(z.string().max(40), z.string().max(40)).optional() })).max(256), usdzPath: z.string().optional(),
     floors: z.array(z.object({ transform: z.array(finite).length(16), corners: z.array(z.array(finite).length(3)).max(128).optional() })).max(16).optional(),
     // Measured on the phone from the LiDAR right after the scan (CeilingEstimator.swift); checked below, never trusted blindly.
-    ceiling: z.unknown().optional() }),
+    ceiling: z.unknown().optional(), ceilingStatus: z.enum(['processing', 'deferred', 'unavailable', 'complete']).optional() }),
   z.object({ kind: z.literal('arcore'), corners: z.array(z.object({ x: finite, z: finite })).max(128), points: z.array(z.object({ x: finite, y: finite, z: finite })).max(20000), floorY: finite, height: z.number().min(0.5).max(12), depth: z.boolean() }),
 ]);
 export type NativeCapture = z.infer<typeof captureSchema>;
@@ -81,10 +81,18 @@ export function normalizeCapture(value: unknown, name: string): Room {
     openings.push(opening);
   }
   const ceiling = capture.ceiling === undefined ? undefined : ceilingSchema.safeParse(capture.ceiling);
+  if (!ceiling?.success && ['processing', 'deferred'].includes(capture.ceilingStatus ?? '')) warnings.push('Room saved; ceiling processing was deferred. Raw scan data is preserved for local processing on the laptop.');
   if (ceiling?.success) warnings.push('Ceiling, beams and hanging fixtures measured on the phone from LiDAR.');
   else if (ceiling) warnings.push('The ceiling measured on the phone was not usable and was left out.');
+  if (ceiling?.success && ceiling.data.measurementDiagnostics) {
+    const diagnostics = ceiling.data.measurementDiagnostics;
+    warnings.push('Ceiling height uses the scanner’s floor estimate; absolute accuracy is not verified.');
+    if ((diagnostics.repeatCoverage ?? 0) < .5) warnings.push('Less than half of the observed ceiling has repeat-view coverage.');
+    if (diagnostics.repeatSpreadP90Meters > .02) warnings.push(`Ceiling repeat views differ by ${(diagnostics.repeatSpreadP90Meters * 100).toFixed(1)} cm (P90). Recheck before using a 2 cm tolerance.`);
+  }
   return parseRoom({ ...base, source: 'roomplan', walls, floor, floorEvidence: floor.length ? 'inferred' : 'missing', openings, ...(ceiling?.success ? { ceiling: ceiling.data } : {}),
     objects: capture.objects.map(o => ({ id: o.id, label: o.category, category: o.category, position: { x: o.transform[12], y: o.transform[13] - floorY, z: o.transform[14] }, size: { x: o.width, y: o.height, z: Math.max(0.02, o.depth) }, rotation: Math.atan2(-o.transform[2], o.transform[0]), evidence: o.confidence === 'low' ? 'estimated' : 'measured', ...(o.attributes ? { attributes: o.attributes } : {}) })),
+    measurementQuality: { version: 'geometry-qa-v1', status: 'needs-rescan', targetMeters: .02, reasons: ['Raw depth repeat-view checks have not run. Process the raw bundle before relying on 2 cm measurements.'], applied: [] },
     warnings: warnings.slice(0, 50), originalUsdzPath: capture.usdzPath,
   });
 }

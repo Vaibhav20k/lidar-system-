@@ -39,8 +39,8 @@ def ceiling_points(capture, raw: Path, floor_y):
     manifest = json.loads((raw / 'manifest.json').read_text())
     dw, dh = manifest['depthSize']
     u, v = np.meshgrid(np.arange(dw) + 0.5, np.arange(dh) + 0.5)
-    chunks, sides = [], []
-    for line in (raw / 'frames.jsonl').read_text().splitlines():
+    chunks, sides, frame_ids = [], [], []
+    for frame_id, line in enumerate((raw / 'frames.jsonl').read_text().splitlines()):
         if not line.strip():
             continue
         f = json.loads(line)
@@ -59,17 +59,58 @@ def ceiling_points(capture, raw: Path, floor_y):
         world = camera @ pose[:3, :3].T + pose[:3, 3]
         world_normal_y = normal @ pose[1, :3]
         usable = (depth > 0.3) & (depth < 5) & (world[..., 1] - floor_y > MIN_HEIGHT)
-        chunks.append(world[usable & (confidence >= 1) & (world_normal_y < FACING_DOWN)])
+        selected = usable & (confidence >= 1) & (world_normal_y < FACING_DOWN)
+        chunks.append(world[selected])
+        frame_ids.append(np.full(int(selected.sum()), frame_id, np.int32))
         sides.append(world[usable & (confidence >= 2) & (np.abs(world_normal_y) < FACING_SIDE)])
     empty = np.zeros((0, 3))
-    return (np.concatenate(chunks) if chunks else empty), (np.concatenate(sides) if sides else empty)
+    return ((np.concatenate(chunks) if chunks else empty), (np.concatenate(sides) if sides else empty),
+            np.concatenate(frame_ids) if frame_ids else np.empty(0, np.int32))
+
+
+def balanced_cell_heights(cells, heights, frames, size):
+    """Median within each view, then across views; never select an upper tail.
+
+    Three views support repeat quality. Sparse cells retain a candidate height
+    for classifying ceiling versus beams; they do not become repeat evidence.
+    """
+    groups = {}
+    order = np.lexsort((frames, cells))
+    keys = np.column_stack([cells[order], frames[order]])
+    if not len(keys):
+        return np.zeros(size), np.zeros(size, bool), []
+    starts = np.r_[0, np.flatnonzero(np.any(np.diff(keys, axis=0), axis=1)) + 1]
+    ends = np.r_[starts[1:], len(keys)]
+    for start, end in zip(starts, ends):
+        if end - start >= 2:
+            groups.setdefault(int(keys[start, 0]), []).append(float(np.median(heights[order[start:end]])))
+    result, seen, spreads = np.zeros(size), np.zeros(size, bool), []
+    for cell, values in groups.items():
+        result[cell] = np.median(values)
+        if len(values) >= 3:
+            seen[cell] = True
+            spreads.append(float(np.quantile(values, .9, method='lower') - np.quantile(values, .1, method='lower')))
+    return result, seen, spreads
 
 
 BEAM_STRETCH = 0.25        # walls are read in stretches this long for beams running along them
 BEAM_MIN_DROP = 0.10       # a beam hangs at least this far below the ceiling (a cornice is only the top few cm)
 BEAM_MIN_DEPTH = 0.04      # and stands at least this far out from the wall
-BEAM_MAX_DEPTH = 0.35      # wider beams and bulkheads are measured well by the ceiling grid
+BEAM_MAX_DEPTH = 0.35      # narrow beams: read as before
 BEAM_MAX_DROP = 0.45       # a narrow beam along a wall hangs no lower than this; lower faces are door frames, blind boxes, cupboards
+# Big beams and bulkheads (25-90 cm out, down to 90 cm below the ceiling). The grid draws them with ragged edges, so they
+# are read from their faces too, with tests that only a beam passes: its bottom is joined to the wall and fills the way
+# out to its front face (a curtain rod or a fan blade floats free of the wall), and it is not the head of a door or window.
+BIG_MIN_DEPTH = 0.25
+BIG_MAX_DEPTH = 0.9
+BIG_MAX_DROP = 0.9
+BEAM_ATTACH = 0.06         # a big beam's bottom starts within this of the wall
+BEAM_BIN = 0.02            # it is followed outward from the wall in steps this wide
+BEAM_SPAN = 0.8            # and must be seen across this share of the way from the wall to the front face
+HEAD_GAP = 0.08            # a bottom this close to the top of an opening below it is that opening's head
+FRAME_POINTS = 20          # points a single frame needs on each surface to measure a big beam on its own
+MIN_FRAMES = 3             # frames that must measure a stretch for their median to be used
+BULKHEAD_DEPTH = 0.6       # this far out or more it is reported as a lowered ceiling (bulkhead) rather than a beam
 BEAM_MIN_LENGTH = 1.5
 FACE_FILL = 0.7            # the beam's front face must be seen in this share of its height
 
@@ -82,7 +123,7 @@ def wall_beams(capture, raw, floor_y, ceiling_height, room_walls):
     ceiling grid, where the cleanup takes it for noise and cells shared with the ceiling read as ceiling. A cornice
     has a face only in the top few cm, so it never passes. Each wall is read in 25 cm stretches; a beam is the longest
     run of stretches that show one. Returns (regions, notes)."""
-    points, normals = depth_points(raw)
+    points, normals, frame_of = depth_points(raw, with_frames=True)
     height = points[:, 1] - floor_y
     regions, notes = [], []
     for w in capture['walls']:
@@ -92,7 +133,7 @@ def wall_beams(capture, raw, floor_y, ceiling_height, room_walls):
         rel = points - wall.origin
         along, out = rel @ wall.axis_x, rel @ wall.inward
         facing, down = normals @ wall.inward > 0.8, normals[:, 1] < -0.8
-        near = (np.abs(along) < wall.width / 2) & (out > -0.2) & (out < BEAM_MAX_DEPTH + 0.2)
+        near = (np.abs(along) < wall.width / 2) & (out > -0.2) & (out < BIG_MAX_DEPTH + 0.2)
         starts = np.arange(-wall.width / 2, wall.width / 2 - BEAM_STRETCH / 2, BEAM_STRETCH)
         # Where the wall surface is, stretch by stretch; where a wardrobe hides it, the rest of the wall tells.
         surfaces = []
@@ -106,24 +147,103 @@ def wall_beams(capture, raw, floor_y, ceiling_height, room_walls):
         if len(known) < 3:
             continue
         typical = float(np.median(known))
+        # Tops of doors and windows on this wall, as (from, to, height above the floor) along it.
+        heads = []
+        for o in capture.get('openings', []):
+            m = np.array(o['transform'], float).reshape(4, 4).T
+            rel_o = m[:3, 3] - wall.origin
+            if abs(rel_o @ wall.inward) < 0.3 and abs(rel_o @ wall.axis_x) < wall.width / 2 + 0.2:
+                c = rel_o @ wall.axis_x
+                heads.append((c - o['width'] / 2, c + o['width'] / 2, m[1, 3] + o['height'] / 2 - floor_y))
+
+        def big_beam(stretch, wall_at, s0):
+            """A big beam in one stretch: (bottom, wall_at, front) or None."""
+            under = stretch & down & (height > 1.9) & (height < ceiling_height - BEAM_MIN_DROP) & (out > wall_at - 0.03) & (out < wall_at + BIG_MAX_DEPTH + 0.05)
+            if under.sum() < 15:
+                return None
+            hist, edges = np.histogram(height[under], bins=np.arange(1.9, ceiling_height, 0.01))
+            smooth = np.convolve(hist, np.ones(3), 'same')
+            bins = np.arange(-0.03, BIG_MAX_DEPTH + 0.05, BEAM_BIN)
+            for peak in np.argsort(smooth)[::-1][:4]:
+                if smooth[peak] < 6:
+                    return None
+                bottom = float(edges[peak] + 0.005)
+                steps = np.histogram(out[under & (np.abs(height - bottom) < 0.02)] - wall_at, bins=bins)[0] >= 2
+                if not steps.any() or int(np.argmax(steps)) * BEAM_BIN - 0.03 > BEAM_ATTACH:
+                    continue  # not joined to the wall
+                if any(a - 0.1 < s0 + BEAM_STRETCH and b + 0.1 > s0 and abs(top_o - bottom) < HEAD_GAP for a, b, top_o in heads):
+                    return None  # the head of a door or window
+                # The wall just under the beam, seen in the same views as the beam: a scan that drifted a few cm between
+                # looking low and looking high would otherwise put the wall and the face out of step.
+                below = stretch & facing & (height > bottom - 0.5) & (height < bottom - 0.05) & (np.abs(out - wall_at) < 0.12)
+                if below.sum() >= 40:
+                    counts, cuts = np.histogram(out[below], bins=np.arange(wall_at - 0.12, wall_at + 0.125, 0.01))
+                    wall_at = float(cuts[np.convolve(counts, np.ones(3), 'same').argmax()] + 0.005)
+                top = ceiling_height - 0.06
+                face = stretch & facing & (height > bottom + 0.02) & (height < top) & (out > wall_at + BIG_MIN_DEPTH - 0.03) & (out < wall_at + BIG_MAX_DEPTH + 0.05)
+                bands = np.arange(bottom + 0.02, top, 0.02)
+                if len(bands) < 2 or face.sum() < 15:
+                    return None
+                filled = np.mean([((height[face] >= b) & (height[face] < b + 0.02)).sum() >= 3 for b in bands])
+                front = float(np.median(out[face]))
+                first = int(round(0.03 / BEAM_BIN))
+                span = steps[first:max(first + 1, int((front - wall_at + 0.03) / BEAM_BIN))]
+                if (filled < FACE_FILL or not BIG_MIN_DEPTH <= front - wall_at <= BIG_MAX_DEPTH
+                        or ceiling_height - bottom > BIG_MAX_DROP or span.mean() < BEAM_SPAN):
+                    return None
+                # Depth and drop are measured inside each frame and the median taken. One frame is rigid; a scan whose
+                # tracking slipped puts the same beam in two places 10-30 cm apart, and pooled points mix the copies.
+                depths, drops = [], []
+                idx = np.where(stretch & (out < wall_at + BIG_MAX_DEPTH + 0.2))[0]
+                for f in np.unique(frame_of[idx]):
+                    m = idx[frame_of[idx] == f]
+                    # Only the beam's own bottom (an AC or a lamp under it faces down too), and the back-most upright
+                    # surface under it as the wall (an AC's front stands out in front of the wall).
+                    under_f = m[down[m] & (np.abs(height[m] - bottom) < 0.12)]
+                    if len(under_f) < FRAME_POINTS:
+                        continue
+                    bottom_f = float(np.median(height[under_f]))
+                    wall_f = m[facing[m] & (height[m] > bottom_f - 0.5) & (height[m] < bottom_f - 0.05)]
+                    if len(wall_f) < FRAME_POINTS:
+                        continue
+                    back = float(np.percentile(out[wall_f], 10))
+                    wall_out = float(np.median(out[wall_f][np.abs(out[wall_f] - back) < 0.03]))
+                    face_f = m[facing[m] & (height[m] > bottom_f + 0.03) & (height[m] < ceiling_height - 0.08) & (out[m] > wall_out + BIG_MIN_DEPTH - 0.05)]
+                    if len(face_f) < FRAME_POINTS:
+                        continue
+                    face_out = float(np.median(out[face_f]))
+                    depths.append(face_out - wall_out)
+                    beside_f = m[down[m] & (out[m] > face_out + 0.05) & (np.abs(height[m] - ceiling_height) < 0.2)]
+                    if len(beside_f) >= FRAME_POINTS:
+                        drops.append(float(np.median(height[beside_f])) - bottom_f)
+                if len(depths) >= MIN_FRAMES:
+                    front = wall_at + float(np.median(depths))
+                    if not BIG_MIN_DEPTH <= front - wall_at <= BIG_MAX_DEPTH:
+                        return None
+                if len(drops) >= MIN_FRAMES:
+                    bottom = ceiling_height - float(np.median(drops))
+                return (bottom, wall_at, front)
+            return None
+
         found = []
         for s0, wall_at in zip(starts, surfaces):
             stretch = near & (along >= s0) & (along < s0 + BEAM_STRETCH)
             wall_at = typical if wall_at is None or abs(wall_at - typical) > 0.05 else wall_at
-            under = stretch & down & (height > 1.9) & (height < ceiling_height - BEAM_MIN_DROP) & (out > wall_at - 0.03)
+            narrow = stretch & (out < BEAM_MAX_DEPTH + 0.2)  # the narrow-beam reading looks no further out than it always has
+            under = narrow & down & (height > 1.9) & (height < ceiling_height - BEAM_MIN_DROP) & (out > wall_at - 0.03)
             if under.sum() < 15:
-                found.append(None); continue
+                found.append(big_beam(stretch, wall_at, s0)); continue
             hist, edges = np.histogram(height[under], bins=np.arange(1.9, ceiling_height, 0.01))
             bottom = float(edges[np.convolve(hist, np.ones(3), 'same').argmax()] + 0.005)
             top = ceiling_height - 0.06  # above this a cornice may stand out too
-            face = stretch & facing & (height > bottom + 0.02) & (height < top) & (out > wall_at + BEAM_MIN_DEPTH - 0.01)
+            face = narrow & facing & (height > bottom + 0.02) & (height < top) & (out > wall_at + BEAM_MIN_DEPTH - 0.01)
             bands = np.arange(bottom + 0.02, top, 0.02)
             if len(bands) < 2 or face.sum() < 15:
-                found.append(None); continue
+                found.append(big_beam(stretch, wall_at, s0)); continue
             filled = np.mean([((height[face] >= b) & (height[face] < b + 0.02)).sum() >= 3 for b in bands])
             front = float(np.median(out[face]))
             if filled < FACE_FILL or front - wall_at < BEAM_MIN_DEPTH or ceiling_height - bottom > BEAM_MAX_DROP:
-                found.append(None); continue
+                found.append(big_beam(stretch, wall_at, s0)); continue
             found.append((bottom, wall_at, front))
         # The longest run of beam stretches, bridging single gaps (a lamp or a cable in front of the face).
         best, run, gap = (0, 0), None, 0
@@ -149,7 +269,8 @@ def wall_beams(capture, raw, floor_y, ceiling_height, room_walls):
         bottoms, depths = np.array([f[0] for f in hits]), np.array([f[2] - f[1] for f in hits])
         trend = np.polyfit(centres, depths, 1) if len(hits) >= 3 else np.array([0.0, float(np.median(depths))])
         # Heights come in 1 cm steps, so the bottom gets 4 cm: a tighter limit flips on a millimetre of rounding.
-        agree = (np.abs(bottoms - np.median(bottoms)) <= 0.04) & (np.abs(depths - np.polyval(trend, centres)) <= 0.03)
+        # A big beam's face is far from the wall, so a few cm of scan drift weigh on it more: 4 cm there.
+        agree = (np.abs(bottoms - np.median(bottoms)) <= 0.04) & (np.abs(depths - np.polyval(trend, centres)) <= (0.04 if np.median(depths) >= BIG_MIN_DEPTH else 0.03))
         if agree.mean() < 0.6:
             continue
         bottom, wall_at, front = (float(np.median([f[k] for f, ok in zip(hits, agree) if ok])) for k in range(3))
@@ -174,7 +295,8 @@ def wall_beams(capture, raw, floor_y, ceiling_height, room_walls):
         regions.append({'points': [{'x': round(float(c[0]), 3), 'z': round(float(c[2]), 3)} for c in corners], 'height': round(bottom, 3), 'evidence': 'measured'})
         d0, d1 = sorted(float(np.polyval(trend, u)) * 100 for u in (u0, u1))
         out_text = f'{(front - wall_at) * 100:.0f} cm' if d1 - d0 < 2 else f'{d0:.0f}-{d1:.0f} cm'
-        notes.append(f"beam along a {wall.width:.2f} m wall: {out_text} out from the wall, {(ceiling_height - bottom) * 100:.0f} cm below the ceiling, {u1 - u0:.2f} m long")
+        kind = 'lowered ceiling (bulkhead)' if front - wall_at >= BULKHEAD_DEPTH else 'beam'
+        notes.append(f"{kind} along a {wall.width:.2f} m wall: {out_text} out from the wall, {(ceiling_height - bottom) * 100:.0f} cm below the ceiling, {u1 - u0:.2f} m long")
     return regions, notes
 
 
@@ -245,20 +367,16 @@ def main():
     cv2.fillPoly(inside, [np.round((floor - origin) / CELL - 0.5).astype(np.int32)], 1)
     inside = inside.astype(bool)
 
-    points, side_points = ceiling_points(capture, raw, floor_y)
+    points, side_points, frame_ids = ceiling_points(capture, raw, floor_y)
     a, b = to_room(points[:, 0], points[:, 2])
     ix, iz = ((a - origin[0]) / CELL).astype(int), ((b - origin[1]) / CELL).astype(int)
     ok = (ix >= 0) & (ix < cols) & (iz >= 0) & (iz < rows)
+    bounded = ok.copy()
+    ok[bounded] &= inside[iz[bounded], ix[bounded]]
     ix, iz, heights = ix[ok], iz[ok], (points[ok, 1] - floor_y).astype(np.float32)
-    top = np.full((rows, cols), -np.inf, np.float32)
-    np.maximum.at(top, (iz, ix), heights)
-    # Average the points near each cell's top so one stray reading does not set the height.
-    near = heights > top[iz, ix] - 0.08
-    total, count = np.zeros((rows, cols), np.float64), np.zeros((rows, cols), np.int32)
-    np.add.at(total, (iz[near], ix[near]), heights[near])
-    np.add.at(count, (iz[near], ix[near]), 1)
-    seen = inside & (count >= 4)
-    height = np.where(seen, total / np.maximum(count, 1), 0).astype(np.float32)
+    heights_grid, observed, repeat_spreads = balanced_cell_heights(iz * cols + ix, heights, frame_ids[ok], rows * cols)
+    seen = inside & (heights_grid.reshape(rows, cols) > 0)
+    height = np.where(seen, heights_grid.reshape(rows, cols), 0).astype(np.float32)
     if seen.sum() * CELL * CELL < 1:
         raise SystemExit('Too little of the ceiling was scanned to measure it.')
 
@@ -314,7 +432,7 @@ def main():
     def reach_side_face(fine, low):
         """Push a lower region's edges out to its measured side face.
 
-        Each grid cell takes the highest surface seen in it, so cells on a beam's edge count as ceiling and the beam
+        Cells on a beam's edge can mix ceiling and beam observations, so the beam
         comes out several cm narrow. Look outward from each edge, along the grid, for the beam's side face (vertical
         points between the beam's underside and the ceiling) within MAX_GROW, and take everything up to where those
         points are densest. Edges with no measured face are left where they are."""
@@ -364,27 +482,48 @@ def main():
     room_walls_xz = [(np.array([w['start']['x'], w['start']['z']]), np.array([w['end']['x'], w['end']['z']])) for w in room['walls']]
     regions, fixtures = hanging_fixtures(regions, room_walls_xz, levels[main])
     beams, beam_notes = wall_beams(capture, raw, floor_y, levels[main], {w['id'] for w in room['walls']})
-    for beam in beams:
-        strip = [[p['x'], p['z']] for p in beam['points']]
-        lower = [[[p['x'], p['z']] for p in r['points']] for r in regions if r['height'] < levels[main]]
-        everything = np.array(strip + [p for poly in lower for p in poly]) if lower else np.array(strip)
+    if beams:
+        strips = [[[p['x'], p['z']] for p in beam['points']] for beam in beams]
+        lower = [r for r in regions if r['height'] < levels[main]]
+        polys = [[[p['x'], p['z']] for p in r['points']] for r in lower]
+        everything = np.array([p for poly in strips + polys for p in poly])
         low = everything.min(axis=0) - 0.2
         size = tuple((((everything.max(axis=0) + 0.2 - low) * 50).astype(int) + 1)[::-1])
-        beam_mask = polygon_mask([strip], low, size)
-        if lower:
-            grid = polygon_mask(lower, low, size)
-            touching = [poly for poly in lower if (polygon_mask([poly], low, size) & beam_mask).any()]
-            if (beam_mask & grid).sum() >= 0.8 * beam_mask.sum() and polygon_mask(touching, low, size).sum() >= 2 * beam_mask.sum():
-                continue  # the ceiling grid already has this beam whole, and it is wider than the strip: its outline is kept
-        # Grid fragments of the same beam give way to the measured strip.
-        near_beam = cv2.dilate(beam_mask.astype(np.uint8), np.ones((11, 11), np.uint8)).astype(bool)
-        regions = [r for r in regions if not (r['height'] < levels[main] and (lambda m: (m & near_beam).sum() >= 0.6 * max(m.sum(), 1))(polygon_mask([[[p['x'], p['z']] for p in r['points']]], low, size)))]
-        regions.append(beam)
-        print('   ' + beam_notes[beams.index(beam)])
+        # Grid pieces drawn from the beams give way to the measured strips. The strips are taken together, so an L of
+        # beams round a corner replaces the one L-shaped grid piece that neither strip covers enough of alone. A beam
+        # that a wider grid shape holds whole (a bulkhead it runs into) is left out and that shape kept; this is settled
+        # before anything is removed, so no grid piece is dropped for a beam that is then not drawn.
+        masks = [polygon_mask([poly], low, size) for poly in polys]
+        strip_masks = [polygon_mask([strip], low, size) for strip in strips]
+        accepted = list(range(len(beams)))
+        for _ in range(len(beams) + 1):
+            union = np.logical_or.reduce([strip_masks[i] for i in accepted]) if accepted else np.zeros(size, bool)
+            near_beams = cv2.dilate(union.astype(np.uint8), np.ones((11, 11), np.uint8)).astype(bool)
+            replaced = [bool(accepted) and (m & near_beams).sum() >= 0.6 * max(m.sum(), 1) for m in masks]
+            kept_masks = [m for m, gone in zip(masks, replaced) if not gone]
+            still = []
+            for i in accepted:
+                touching = [m for m in kept_masks if (m & strip_masks[i]).any()]
+                covered = np.logical_or.reduce(touching) if touching else np.zeros(size, bool)
+                if not ((strip_masks[i] & covered).sum() >= 0.8 * strip_masks[i].sum() and covered.sum() >= 2 * strip_masks[i].sum()):
+                    still.append(i)
+            if still == accepted:
+                break
+            accepted = still
+        gone = {id(r) for r, out_ in zip(lower, replaced) if out_}
+        regions = [r for r in regions if id(r) not in gone]
+        for i in accepted:
+            regions.append(beams[i])
+            print('   ' + beam_notes[i])
     regions = sorted(regions, key=lambda r: r['evidence'] != 'measured')[:64]  # measured beams first if there are too many
 
     coverage = round(float(seen.sum() / inside.sum()), 2)
     room['ceiling'] = {'height': round(levels[main], 3), 'coverage': coverage, 'regions': regions}
+    room['ceiling']['measurementDiagnostics'] = {
+        'method': 'frame-balanced-median-v2', 'heightDatum': 'RoomPlan floor (not independently validated)',
+        'repeatCoverage': float(observed.sum() / max(1, seen.sum())),
+        'repeatSpreadP90Meters': float(np.quantile(repeat_spreads, .9, method='lower')) if repeat_spreads else 0.,
+        'absoluteAccuracyVerified': False}
     if fixtures:
         room['ceiling']['items'] = fixtures
         print(f'   {len(fixtures)} hanging fixture(s) (fan or lamp) kept as ceiling items to check, not as lower ceiling')

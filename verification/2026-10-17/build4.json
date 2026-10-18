@@ -1,0 +1,8 @@
+{
+  "bundle": "com.roomform.studio.team2",
+  "build": "4",
+  "appPath": "/tmp/roomform-install-build-2/Build/Products/Debug-iphoneos/App.app",
+  "signedBuildSucceeded": true,
+  "installed": false,
+  "reason": "Connected iPhone was no longer available; existing installation was not changed."
+}

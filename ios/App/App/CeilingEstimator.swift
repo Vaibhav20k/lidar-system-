@@ -5,8 +5,23 @@ import simd
 /// A Swift port of scripts/scan_processing/ceiling.py: the main ceiling height, lower and higher regions from a 5 cm
 /// grid, beams running along walls from their own faces, and hanging fixtures (a fan, a lamp) split off the ceiling.
 /// The result has the shape of the room's `ceiling` field. Pure Swift so it can also be compiled and checked on a Mac.
+/// Cooperative cancellation uses monotonic time and is safe across the UI/worker queues.
+final class CeilingWorkBudget {
+    private let lock = NSLock()
+    private var cancelled = false
+    private let deadline: TimeInterval
+    init(seconds: TimeInterval) { deadline = ProcessInfo.processInfo.systemUptime + seconds }
+    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+    var shouldStop: Bool {
+        lock.lock(); let stopped = cancelled; lock.unlock()
+        return stopped || ProcessInfo.processInfo.systemUptime >= deadline
+    }
+}
+
 struct CeilingEstimator {
     struct WallSurface { let id: String; let transform: simd_float4x4; let width: Float; let height: Float }
+    /// A door, window or opening: only its top matters here (a beam bottom level with it is the opening's head).
+    struct Opening { let transform: simd_float4x4; let width: Float; let height: Float }
 
     // Grid (same values as ceiling.py).
     static let cell: Float = 0.05, minHeight: Float = 1.8, facingDown: Float = -0.8, levelBand: Float = 0.07
@@ -15,21 +30,30 @@ struct CeilingEstimator {
     // Beams along walls.
     static let beamStretch: Float = 0.25, beamMinDrop: Float = 0.10, beamMinDepth: Float = 0.04, beamMaxDepth: Float = 0.35
     static let beamMaxDrop: Float = 0.45, beamMinLength: Float = 1.5, faceFill: Float = 0.7
+    // Big beams and bulkheads (25-90 cm out, down to 90 cm), read from their faces with tests only a beam passes: the
+    // bottom is joined to the wall and fills the way out to the face, and it is not the head of a door or window.
+    static let bigMinDepth: Float = 0.25, bigMaxDepth: Float = 0.9, bigMaxDrop: Float = 0.9
+    static let beamAttach: Float = 0.06, beamBin: Float = 0.02, beamSpan: Float = 0.8, headGap: Float = 0.08
+    static let framePoints = 20, minFrames = 3   // per-frame measurement of big beams (a slipped scan doubles them)
 
     let walls: [WallSurface]
     let floor: [SIMD2<Float>]   // the room's floor outline in world x/z
+    var openings: [Opening] = []
+    var shouldCancel: () -> Bool = { false }
+    var onProgress: (String) -> Void = { _ in }
 
     // MARK: - Reading the bundle
 
     private struct Frame { let pose: simd_float4x4; let fx, fy, cx, cy: Float; let depth: [Float]; let confidence: [UInt8] }
 
-    private static func frames(raw: URL) -> (frames: [Frame], width: Int, height: Int)? {
+    private static func frames(raw: URL, shouldCancel: () -> Bool) -> (frames: [Frame], width: Int, height: Int)? {
         guard let manifest = try? JSONSerialization.jsonObject(with: Data(contentsOf: raw.appendingPathComponent("manifest.json"))) as? [String: Any],
               let size = manifest["depthSize"] as? [Int], size.count == 2,
               let index = try? String(contentsOf: raw.appendingPathComponent("frames.jsonl"), encoding: .utf8) else { return nil }
         let (w, h) = (size[0], size[1])
         var result: [Frame] = []
         for line in index.split(separator: "\n") {
+            if shouldCancel() { return nil }
             guard let record = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
                   record["depth"] as? Bool == true, let name = record["frame"] as? String,
                   let k = (record["intrinsics"] as? [NSNumber])?.map({ $0.floatValue }), k.count == 9,
@@ -49,7 +73,8 @@ struct CeilingEstimator {
     /// edges), and everything near a wall above 1 m with its normal (for beams along walls).
     private struct Points {
         var down: [SIMD3<Float>] = [], side: [SIMD3<Float>] = []
-        var near: [SIMD3<Float>] = [], nearNormal: [SIMD3<Float>] = []
+        var downFrame: [Int32] = []
+        var near: [SIMD3<Float>] = [], nearNormal: [SIMD3<Float>] = [], nearFrame: [Int32] = []
     }
 
     private func points(_ bundle: (frames: [Frame], width: Int, height: Int), floorY: Float) -> Points {
@@ -61,7 +86,8 @@ struct CeilingEstimator {
                                   axis: simd_normalize(SIMD3<Float>($0.transform.columns.0.x, $0.transform.columns.0.y, $0.transform.columns.0.z)),
                                   inward: simd_normalize(SIMD3<Float>($0.transform.columns.2.x, $0.transform.columns.2.y, $0.transform.columns.2.z)), width: $0.width) }
         var camera = [SIMD3<Float>](repeating: .zero, count: w * h)
-        for frame in bundle.frames {
+        for (frameIndex, frame) in bundle.frames.enumerated() {
+            if shouldCancel() { return out }
             for y in 0..<h {
                 for x in 0..<w {
                     let d = frame.depth[y * w + x]
@@ -86,14 +112,14 @@ struct CeilingEstimator {
                     if simd_dot(n, camera[i]) > 0 { n = -n }
                     let world = rotation * camera[i] + position, normal = rotation * n, height = world.y - floorY
                     if height > Self.minHeight {
-                        if normal.y < Self.facingDown { out.down.append(world) }
+                        if normal.y < Self.facingDown { out.down.append(world); out.downFrame.append(Int32(frameIndex)) }
                         if c >= 2, abs(normal.y) < Self.facingSide { out.side.append(world) }
                     }
                     if d < 4.5, height > 1.0 {
                         for plane in planes {
                             let rel = world - plane.origin
-                            if abs(simd_dot(rel, plane.axis)) < plane.width / 2 + 0.1, simd_dot(rel, plane.inward) > -0.25, simd_dot(rel, plane.inward) < Self.beamMaxDepth + 0.25 {
-                                out.near.append(world); out.nearNormal.append(normal); break
+                            if abs(simd_dot(rel, plane.axis)) < plane.width / 2 + 0.1, simd_dot(rel, plane.inward) > -0.25, simd_dot(rel, plane.inward) < Self.bigMaxDepth + 0.25 {
+                                out.near.append(world); out.nearNormal.append(normal); out.nearFrame.append(Int32(frameIndex)); break
                             }
                         }
                     }
@@ -140,6 +166,14 @@ struct CeilingEstimator {
             if s > bestValue { bestValue = s; best = b }
         }
         return low + Float(best) * step + step / 2
+    }
+
+    /// Like numpy.percentile with linear interpolation; q in 0...1.
+    private static func percentile(_ values: [Float], _ q: Float) -> Float {
+        let sorted = values.sorted()
+        guard sorted.count > 1 else { return sorted.first ?? 0 }
+        let position = q * Float(sorted.count - 1), low = Int(position.rounded(.down)), high = min(low + 1, sorted.count - 1)
+        return sorted[low] + (sorted[high] - sorted[low]) * (position - Float(low))
     }
 
     private static func polyfit(_ x: [Float], _ y: [Float]) -> (slope: Float, offset: Float) {
@@ -262,11 +296,14 @@ struct CeilingEstimator {
 
     /// The `ceiling` field for the room, or nil when too little of the ceiling was scanned.
     func estimate(raw: URL) -> [String: Any]? {
-        guard floor.count >= 3, !walls.isEmpty, let bundle = Self.frames(raw: raw), !bundle.frames.isEmpty else { return nil }
+        onProgress("Reading depth frames")
+        guard !shouldCancel(), floor.count >= 3, !walls.isEmpty, let bundle = Self.frames(raw: raw, shouldCancel: shouldCancel), !bundle.frames.isEmpty else { return nil }
         let floorY = walls.map { $0.transform.columns.3.y - $0.height / 2 }.min()!
+        onProgress("Projecting depth")
         let pts = points(bundle, floorY: floorY)
-        guard !pts.down.isEmpty else { return nil }
+        guard !shouldCancel(), !pts.down.isEmpty else { return nil }
 
+        onProgress("Fitting ceiling regions")
         // A frame turned to the longest wall, so beams and soffits come out axis-aligned.
         let longest = walls.max { $0.width < $1.width }!.transform
         let angle = atan2(longest.columns.0.z, longest.columns.0.x), cosA = cos(angle), sinA = sin(angle)
@@ -279,22 +316,31 @@ struct CeilingEstimator {
         var inside = Grid(cols: cols, rows: rows, value: false)
         for r in 0..<rows { for c in 0..<cols { inside[r, c] = Self.inside(origin + SIMD2(Float(c) + 0.5, Float(r) + 0.5) * cell, outline) } }
 
-        // Highest surface per cell, averaged over the points near the top.
-        var top = Grid(cols: cols, rows: rows, value: -Float.infinity)
-        var cellOf = [Int](repeating: -1, count: pts.down.count)
+        // Equal weight per view. Selecting max-8cm first biased noisy ceilings
+        // upwards, and a close, dense view could dominate every later revisit.
+        var observations = [Int: [Float]]()
         for (i, p) in pts.down.enumerated() {
             let q = toRoom(p.x, p.z), c = Int(((q.x - origin.x) / cell).rounded(.down)), r = Int(((q.y - origin.y) / cell).rounded(.down))
-            guard c >= 0, c < cols, r >= 0, r < rows else { continue }
-            cellOf[i] = r * cols + c
-            top.values[r * cols + c] = max(top.values[r * cols + c], p.y - floorY)
+            guard c >= 0, c < cols, r >= 0, r < rows, inside[r, c] else { continue }
+            let key = Int(pts.downFrame[i]) * rows * cols + r * cols + c
+            observations[key, default: []].append(p.y - floorY)
         }
-        var total = Grid(cols: cols, rows: rows, value: Float(0)), count = Grid(cols: cols, rows: rows, value: 0)
-        for (i, p) in pts.down.enumerated() where cellOf[i] >= 0 {
-            let h = p.y - floorY
-            if h > top.values[cellOf[i]] - 0.08 { total.values[cellOf[i]] += h; count.values[cellOf[i]] += 1 }
+        guard !shouldCancel() else { return nil }
+        var cells = [[Float]](repeating: [], count: rows * cols)
+        for (key, values) in observations where values.count >= 2 {
+            cells[key % (rows * cols)].append(Self.median(values))
         }
         var seen = Grid(cols: cols, rows: rows, value: false), height = Grid(cols: cols, rows: rows, value: Float(0))
-        for i in 0..<(cols * rows) where inside.values[i] && count.values[i] >= 4 { seen.values[i] = true; height.values[i] = total.values[i] / Float(count.values[i]) }
+        var repeatSpreads: [Float] = []
+        // Retain sparsely observed cells for surface/beam classification. Missing
+        // repeat coverage lowers quality; it must not erase the main ceiling and
+        // make a better-observed beam become the room's ceiling.
+        for i in cells.indices where !cells[i].isEmpty {
+            seen.values[i] = true; height.values[i] = Self.median(cells[i])
+            guard cells[i].count >= 3 else { continue }
+            let sorted = cells[i].sorted()
+            repeatSpreads.append(sorted[Int(Float(sorted.count - 1) * 0.9)] - sorted[Int(Float(sorted.count - 1) * 0.1)])
+        }
         let seenCount = seen.values.filter { $0 }.count
         guard Float(seenCount) * cell * cell >= 1 else { return nil }
 
@@ -358,6 +404,7 @@ struct CeilingEstimator {
         let fineCols = cols * Self.trace, fineRows = rows * Self.trace
         var regions: [[String: Any]] = [], regionPolygons: [(polygon: [SIMD2<Float>], height: Float, evidence: String, holes: [[SIMD2<Float>]])] = []
         for index in levels.indices where index != main {
+            if shouldCancel() { return nil }
             // 3x3 opening removes specks up to 10 cm wide without shifting the mask.
             var mask = Grid(cols: cols, rows: rows, value: false)
             for i in 0..<(cols * rows) { mask.values[i] = smoothed.values[i] == index }
@@ -376,6 +423,7 @@ struct CeilingEstimator {
             // Blobs, traced and simplified.
             var visited = [Bool](repeating: false, count: fineCols * fineRows)
             for start in 0..<(fineCols * fineRows) where fine.values[start] && !visited[start] {
+                if shouldCancel() { return nil }
                 var blob = Grid(cols: fineCols, rows: fineRows, value: false)
                 var stack = [start], size = 0, first = start
                 var minR = fineRows, maxR = 0, minC = fineCols, maxC = 0
@@ -454,31 +502,45 @@ struct CeilingEstimator {
             } else { kept.append(region) }
         }
 
-        // Beams along walls, from their own faces; they replace grid fragments of themselves.
-        for beam in wallBeams(pts, floorY: floorY, ceiling: ceiling) {
-            let lower = kept.filter { $0.height < ceiling }.map { $0.polygon }
-            let all = beam.polygon + lower.flatMap { $0 }
+        // Beams along walls, from their own faces. Grid pieces drawn from them give way to the measured strips, taken
+        // together (an L of beams replaces the one L-shaped grid piece). A beam a wider grid shape holds whole is left
+        // out and that shape kept; this is settled before anything is removed (see ceiling.py).
+        onProgress("Measuring beam faces")
+        if shouldCancel() { return nil }
+        let beams = wallBeams(pts, floorY: floorY, ceiling: ceiling)
+        if !beams.isEmpty {
+            let lowerIndices = kept.indices.filter { kept[$0].height < ceiling }
+            let all = beams.flatMap { $0.polygon } + lowerIndices.flatMap { kept[$0].polygon }
             let low = all.reduce(SIMD2<Float>(repeating: .infinity)) { simd_min($0, $1) } - 0.2
             let high = all.reduce(SIMD2<Float>(repeating: -.infinity)) { simd_max($0, $1) } + 0.2
             let mc = Int((high.x - low.x) * 50) + 1, mr = Int((high.y - low.y) * 50) + 1
-            let beamMask = Self.mask([beam.polygon], low: low, cols: mc, rows: mr), beamCells = beamMask.filter { $0 }.count
-            if !lower.isEmpty {
-                let grid = Self.mask(lower, low: low, cols: mc, rows: mr)
-                let touching = lower.filter { p in zip(Self.mask([p], low: low, cols: mc, rows: mr), beamMask).contains { $0 && $1 } }
-                let covered = zip(beamMask, grid).filter { $0 && $1 }.count
-                if Float(covered) >= 0.8 * Float(beamCells), Float(Self.mask(touching, low: low, cols: mc, rows: mr).filter { $0 }.count) >= 2 * Float(beamCells) { continue }
+            let masks = lowerIndices.map { Self.mask([kept[$0].polygon], low: low, cols: mc, rows: mr) }
+            let stripMasks = beams.map { Self.mask([$0.polygon], low: low, cols: mc, rows: mr) }
+            var accepted = Array(beams.indices), replaced = [Bool](repeating: false, count: masks.count)
+            for _ in 0...beams.count {
+                var union = [Bool](repeating: false, count: mc * mr)
+                for i in accepted { for j in union.indices where stripMasks[i][j] { union[j] = true } }
+                var near = union
+                for r in 0..<mr { for c in 0..<mc where union[r * mc + c] { for dr in -5...5 { for dc in -5...5 {
+                    let rr = r + dr, cc = c + dc
+                    if rr >= 0, cc >= 0, rr < mr, cc < mc { near[rr * mc + cc] = true } } } } }
+                replaced = masks.map { m in
+                    !accepted.isEmpty && Float(zip(m, near).filter { $0 && $1 }.count) >= 0.6 * Float(max(m.filter { $0 }.count, 1))
+                }
+                let keptMasks = masks.indices.filter { !replaced[$0] }.map { masks[$0] }
+                let still = accepted.filter { i in
+                    let strip = stripMasks[i], cells = strip.filter { $0 }.count
+                    var covered = [Bool](repeating: false, count: mc * mr)
+                    for m in keptMasks where zip(m, strip).contains(where: { $0 && $1 }) { for j in covered.indices where m[j] { covered[j] = true } }
+                    let inside = zip(strip, covered).filter { $0 && $1 }.count
+                    return !(Float(inside) >= 0.8 * Float(cells) && Float(covered.filter { $0 }.count) >= 2 * Float(cells))
+                }
+                if still == accepted { break }
+                accepted = still
             }
-            var near = beamMask
-            for r in 0..<mr { for c in 0..<mc where beamMask[r * mc + c] { for dr in -5...5 { for dc in -5...5 {
-                let rr = r + dr, cc = c + dc
-                if rr >= 0, cc >= 0, rr < mr, cc < mc { near[rr * mc + cc] = true } } } } }
-            kept.removeAll { region in
-                guard region.height < ceiling else { return false }
-                let m = Self.mask([region.polygon], low: low, cols: mc, rows: mr)
-                let cells = m.filter { $0 }.count
-                return Float(zip(m, near).filter { $0 && $1 }.count) >= 0.6 * Float(max(cells, 1))
-            }
-            kept.append((beam.polygon, beam.height, beam.evidence, []))
+            let gone = Set(lowerIndices.indices.filter { replaced[$0] }.map { lowerIndices[$0] })
+            kept = kept.indices.filter { !gone.contains($0) }.map { kept[$0] }
+            for i in accepted { kept.append((beams[i].polygon, beams[i].height, beams[i].evidence, [])) }
         }
         // Measured beams first, so they are kept if there are more regions than a room may hold.
         for region in (kept.filter { $0.evidence == "measured" } + kept.filter { $0.evidence != "measured" }).prefix(64) {
@@ -487,8 +549,13 @@ struct CeilingEstimator {
             regions.append(entry)
         }
         var result: [String: Any] = ["height": Self.mm(ceiling), "coverage": (Double(seenCount) / Double(max(1, inside.values.filter { $0 }.count)) * 100).rounded() / 100, "regions": regions]
+        let spreads = repeatSpreads.sorted()
+        result["measurementDiagnostics"] = ["method": "frame-balanced-median-v2", "heightDatum": "RoomPlan floor (not independently validated)",
+            "repeatSpreadP90Meters": spreads.isEmpty ? 0 : spreads[Int(Float(spreads.count - 1) * 0.9)],
+            "repeatCoverage": Double(spreads.count) / Double(max(1, seenCount)),
+            "absoluteAccuracyVerified": false] as [String: Any]
         if !items.isEmpty { result["items"] = items }
-        return result
+        return shouldCancel() ? nil : result
     }
 
     private func reachSideFace(_ fine: Grid<Bool>, low: Float, ceiling: Float, side: [SIMD3<Float>], floorY: Float, origin: SIMD2<Float>,
@@ -539,22 +606,38 @@ struct CeilingEstimator {
 
     /// Beams running along a wall: a flat face standing out from the wall from the beam's bottom up to the ceiling,
     /// a downward-facing bottom, and no ceiling visible behind the face. Read in 25 cm stretches.
+    static func stretchBuckets(_ along: [Float], starts: [Float], width: Float) -> [[Int]] {
+        var buckets = [[Int]](repeating: [], count: starts.count)
+        guard !starts.isEmpty else { return buckets }
+        for (index, value) in along.enumerated() {
+            var lo = 0, hi = starts.count
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if starts[mid] <= value { lo = mid + 1 } else { hi = mid }
+            }
+            let bucket = lo - 1
+            if bucket >= 0 && value < starts[bucket] + width { buckets[bucket].append(index) }
+        }
+        return buckets
+    }
+
     private func wallBeams(_ pts: Points, floorY: Float, ceiling: Float) -> [Beam] {
         var beams: [Beam] = []
         for wall in walls where wall.width >= 0.8 {
+            if shouldCancel() { return [] }
             let origin = SIMD3(wall.transform.columns.3.x, wall.transform.columns.3.y, wall.transform.columns.3.z)
             let axis = simd_normalize(SIMD3(wall.transform.columns.0.x, wall.transform.columns.0.y, wall.transform.columns.0.z))
             let inward = simd_normalize(SIMD3(wall.transform.columns.2.x, wall.transform.columns.2.y, wall.transform.columns.2.z))
-            var along: [Float] = [], out: [Float] = [], height: [Float] = [], facing: [Bool] = [], down: [Bool] = []
-            for (p, n) in zip(pts.near, pts.nearNormal) {
-                let rel = p - origin, a = simd_dot(rel, axis), o = simd_dot(rel, inward)
-                guard abs(a) < wall.width / 2, o > -0.2, o < Self.beamMaxDepth + 0.2 else { continue }
-                along.append(a); out.append(o); height.append(p.y - floorY); facing.append(simd_dot(n, inward) > 0.8); down.append(n.y < -0.8)
+            var along: [Float] = [], out: [Float] = [], height: [Float] = [], facing: [Bool] = [], down: [Bool] = [], frameOf: [Int32] = []
+            for (k, p) in pts.near.enumerated() {
+                let n = pts.nearNormal[k], rel = p - origin, a = simd_dot(rel, axis), o = simd_dot(rel, inward)
+                guard abs(a) < wall.width / 2, o > -0.2, o < Self.bigMaxDepth + 0.2 else { continue }
+                along.append(a); out.append(o); height.append(p.y - floorY); facing.append(simd_dot(n, inward) > 0.8); down.append(n.y < -0.8); frameOf.append(pts.nearFrame[k])
             }
             var starts: [Float] = []
             var s0 = -wall.width / 2
             while s0 < wall.width / 2 - Self.beamStretch / 2 { starts.append(s0); s0 += Self.beamStretch }
-            let byStretch = starts.map { s in along.indices.filter { along[$0] >= s && along[$0] < s + Self.beamStretch } }
+            let byStretch = Self.stretchBuckets(along, starts: starts, width: Self.beamStretch)
             let surfaces: [Float?] = byStretch.map { idx in
                 let body = idx.filter { facing[$0] && height[$0] > 1.0 && height[$0] < 2.0 && abs(out[$0]) < 0.15 }.map { out[$0] }
                 return body.count >= 40 ? Self.peak(body, from: -0.15, to: 0.155, step: 0.01) : nil
@@ -562,21 +645,96 @@ struct CeilingEstimator {
             let known = surfaces.compactMap { $0 }
             guard known.count >= 3 else { continue }
             let typical = Self.median(known)
-            var found: [(bottom: Float, wall: Float, front: Float)?] = []
-            for (k, idx) in byStretch.enumerated() {
-                let wallAt = surfaces[k].flatMap { abs($0 - typical) > 0.05 ? nil : $0 } ?? typical
-                let under = idx.filter { down[$0] && height[$0] > 1.9 && height[$0] < ceiling - Self.beamMinDrop && out[$0] > wallAt - 0.03 }.map { height[$0] }
-                guard under.count >= 15, let bottom = Self.peak(under, from: 1.9, to: ceiling, step: 0.01) else { found.append(nil); continue }
-                let topLimit = ceiling - 0.06
-                let face = idx.filter { facing[$0] && height[$0] > bottom + 0.02 && height[$0] < topLimit && out[$0] > wallAt + Self.beamMinDepth - 0.01 }
+            // Tops of doors and windows on this wall: (from, to, height above the floor) along it.
+            let heads: [(Float, Float, Float)] = openings.compactMap { o in
+                let rel = SIMD3(o.transform.columns.3.x, o.transform.columns.3.y, o.transform.columns.3.z) - origin
+                let c = simd_dot(rel, axis)
+                guard abs(simd_dot(rel, inward)) < 0.3, abs(c) < wall.width / 2 + 0.2 else { return nil }
+                return (c - o.width / 2, c + o.width / 2, o.transform.columns.3.y + o.height / 2 - floorY)
+            }
+            func filledShare(_ face: [Int], from bottom: Float, to topLimit: Float) -> Float? {
                 var bands: [Float] = []
                 var b = bottom + 0.02
                 while b < topLimit { bands.append(b); b += 0.02 }
-                guard bands.count >= 2, face.count >= 15 else { found.append(nil); continue }
+                guard bands.count >= 2, face.count >= 15 else { return nil }
                 let faceHeights = face.map { height[$0] }
-                let filled = Float(bands.filter { band in faceHeights.filter { $0 >= band && $0 < band + 0.02 }.count >= 3 }.count) / Float(bands.count)
+                return Float(bands.filter { band in faceHeights.filter { $0 >= band && $0 < band + 0.02 }.count >= 3 }.count) / Float(bands.count)
+            }
+            /// A big beam in one stretch (see ceiling.py big_beam).
+            func bigBeam(_ idx: [Int], wallAt start: Float, s0: Float) -> (bottom: Float, wall: Float, front: Float)? {
+                var wallAt = start
+                let under = idx.filter { down[$0] && height[$0] > 1.9 && height[$0] < ceiling - Self.beamMinDrop && out[$0] > wallAt - 0.03 && out[$0] < wallAt + Self.bigMaxDepth + 0.05 }
+                guard under.count >= 15 else { return nil }
+                let bins = Int(((ceiling - 1.9) / 0.01).rounded(.down))
+                guard bins > 0 else { return nil }
+                var hist = [Float](repeating: 0, count: bins)
+                for i in under { let b = Int(((height[i] - 1.9) / 0.01).rounded(.down)); if b >= 0, b < bins { hist[b] += 1 } }
+                let smooth = (0..<bins).map { b in hist[b] + (b > 0 ? hist[b - 1] : 0) + (b + 1 < bins ? hist[b + 1] : 0) }
+                let steps = Int(((Self.bigMaxDepth + 0.08) / Self.beamBin).rounded(.down))
+                for peak in smooth.indices.sorted(by: { smooth[$0] > smooth[$1] }).prefix(4) {
+                    guard smooth[peak] >= 6 else { return nil }
+                    var bottom = 1.9 + Float(peak) * 0.01 + 0.005
+                    var filled = [Int](repeating: 0, count: steps)
+                    for i in under where abs(height[i] - bottom) < 0.02 {
+                        let k = Int(((out[i] - wallAt + 0.03) / Self.beamBin).rounded(.down)); if k >= 0, k < steps { filled[k] += 1 }
+                    }
+                    let seen = filled.map { $0 >= 2 }
+                    guard let first = seen.firstIndex(of: true), Float(first) * Self.beamBin - 0.03 <= Self.beamAttach else { continue }
+                    if heads.contains(where: { $0.0 - 0.1 < s0 + Self.beamStretch && $0.1 + 0.1 > s0 && abs($0.2 - bottom) < Self.headGap }) { return nil }
+                    // The wall just under the beam, seen in the same views as the beam.
+                    let below = idx.filter { facing[$0] && height[$0] > bottom - 0.5 && height[$0] < bottom - 0.05 && abs(out[$0] - wallAt) < 0.12 }.map { out[$0] }
+                    if below.count >= 40, let w = Self.peak(below, from: wallAt - 0.12, to: wallAt + 0.125, step: 0.01) { wallAt = w }
+                    let topLimit = ceiling - 0.06
+                    let face = idx.filter { facing[$0] && height[$0] > bottom + 0.02 && height[$0] < topLimit && out[$0] > wallAt + Self.bigMinDepth - 0.03 && out[$0] < wallAt + Self.bigMaxDepth + 0.05 }
+                    guard let share = filledShare(face, from: bottom, to: topLimit) else { return nil }
+                    let front = Self.median(face.map { out[$0] })
+                    let lead = Int((0.03 / Self.beamBin).rounded()), last = max(lead + 1, Int((front - wallAt + 0.03) / Self.beamBin))
+                    let span = seen[lead..<min(last, seen.count)]
+                    let spanShare = span.isEmpty ? 0 : Float(span.filter { $0 }.count) / Float(span.count)
+                    guard share >= Self.faceFill, front - wallAt >= Self.bigMinDepth, front - wallAt <= Self.bigMaxDepth,
+                          ceiling - bottom <= Self.bigMaxDrop, spanShare >= Self.beamSpan else { return nil }
+                    // Depth and drop inside each frame, then the median (see ceiling.py): one frame is rigid, while a
+                    // scan whose tracking slipped puts the same beam in two places and pooled points mix the copies.
+                    var depths: [Float] = [], drops: [Float] = [], front2 = front
+                    let local = idx.filter { out[$0] < wallAt + Self.bigMaxDepth + 0.2 }
+                    for m in Dictionary(grouping: local, by: { frameOf[$0] }).sorted(by: { $0.key < $1.key }).map({ $0.value }) {
+                        let underF = m.filter { down[$0] && abs(height[$0] - bottom) < 0.12 }
+                        guard underF.count >= Self.framePoints else { continue }
+                        let bottomF = Self.median(underF.map { height[$0] })
+                        let wallF = m.filter { facing[$0] && height[$0] > bottomF - 0.5 && height[$0] < bottomF - 0.05 }.map { out[$0] }
+                        guard wallF.count >= Self.framePoints else { continue }
+                        let back = Self.percentile(wallF, 0.1)
+                        let wallOut = Self.median(wallF.filter { abs($0 - back) < 0.03 })
+                        let faceF = m.filter { facing[$0] && height[$0] > bottomF + 0.03 && height[$0] < ceiling - 0.08 && out[$0] > wallOut + Self.bigMinDepth - 0.05 }
+                        guard faceF.count >= Self.framePoints else { continue }
+                        let faceOut = Self.median(faceF.map { out[$0] })
+                        depths.append(faceOut - wallOut)
+                        let besideF = m.filter { down[$0] && out[$0] > faceOut + 0.05 && abs(height[$0] - ceiling) < 0.2 }
+                        if besideF.count >= Self.framePoints { drops.append(Self.median(besideF.map { height[$0] }) - bottomF) }
+                    }
+                    if depths.count >= Self.minFrames {
+                        front2 = wallAt + Self.median(depths)
+                        guard front2 - wallAt >= Self.bigMinDepth, front2 - wallAt <= Self.bigMaxDepth else { return nil }
+                    }
+                    if drops.count >= Self.minFrames { bottom = ceiling - Self.median(drops) }
+                    return (bottom, wallAt, front2)
+                }
+                return nil
+            }
+            var found: [(bottom: Float, wall: Float, front: Float)?] = []
+            for (k, idx) in byStretch.enumerated() {
+                if shouldCancel() { return [] }
+                let wallAt = surfaces[k].flatMap { abs($0 - typical) > 0.05 ? nil : $0 } ?? typical
+                let s0 = starts[k]
+                // The narrow-beam reading looks no further out than it always has.
+                let narrow = idx.filter { out[$0] < Self.beamMaxDepth + 0.2 }
+                let under = narrow.filter { down[$0] && height[$0] > 1.9 && height[$0] < ceiling - Self.beamMinDrop && out[$0] > wallAt - 0.03 }.map { height[$0] }
+                guard under.count >= 15, let bottom = Self.peak(under, from: 1.9, to: ceiling, step: 0.01) else { found.append(bigBeam(idx, wallAt: wallAt, s0: s0)); continue }
+                let topLimit = ceiling - 0.06
+                let face = narrow.filter { facing[$0] && height[$0] > bottom + 0.02 && height[$0] < topLimit && out[$0] > wallAt + Self.beamMinDepth - 0.01 }
+                guard let filled = filledShare(face, from: bottom, to: topLimit) else { found.append(bigBeam(idx, wallAt: wallAt, s0: s0)); continue }
                 let front = Self.median(face.map { out[$0] })
-                if filled < Self.faceFill || front - wallAt < Self.beamMinDepth || ceiling - bottom > Self.beamMaxDrop { found.append(nil); continue }
+                if filled < Self.faceFill || front - wallAt < Self.beamMinDepth || ceiling - bottom > Self.beamMaxDrop { found.append(bigBeam(idx, wallAt: wallAt, s0: s0)); continue }
                 found.append((bottom, wallAt, front))
             }
             // The longest run of beam stretches, bridging single gaps.
@@ -599,7 +757,9 @@ struct CeilingEstimator {
             let bottoms = hits.map { $0.bottom }, depths = hits.map { $0.front - $0.wall }
             let trend = Self.polyfit(centres, depths), medianBottom = Self.median(bottoms)
             // Heights come in 1 cm steps, so the bottom gets 4 cm: a tighter limit flips on a millimetre of rounding.
-            let agree = hits.indices.map { abs(bottoms[$0] - medianBottom) <= 0.04 && abs(depths[$0] - (trend.slope * centres[$0] + trend.offset)) <= 0.03 }
+            // A big beam's face is far from the wall, so a few cm of scan drift weigh on it more: 4 cm there.
+            let depthLimit: Float = Self.median(depths) >= Self.bigMinDepth ? 0.04 : 0.03
+            let agree = hits.indices.map { abs(bottoms[$0] - medianBottom) <= 0.04 && abs(depths[$0] - (trend.slope * centres[$0] + trend.offset)) <= depthLimit }
             guard Float(agree.filter { $0 }.count) / Float(agree.count) >= 0.6 else { continue }
             let good = hits.indices.filter { agree[$0] }
             let bottom = Self.median(good.map { hits[$0].bottom }), wallAt = Self.median(good.map { hits[$0].wall }), front = Self.median(good.map { hits[$0].front })

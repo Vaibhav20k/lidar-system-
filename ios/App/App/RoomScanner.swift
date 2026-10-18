@@ -62,7 +62,7 @@ public class RoomScannerPlugin: CAPPlugin, CAPBridgedPlugin {
                         }
                     }
                     scanner.modalPresentationStyle = .fullScreen
-                    DispatchQueue.global(qos: .utility).async { Self.pruneRawBundles() }
+                    // Preserve raw scans for repeatability checks. Never prune saved captures automatically.
                     presenter.present(scanner, animated: true)
                 }
             }
@@ -174,14 +174,6 @@ public class RoomScannerPlugin: CAPPlugin, CAPBridgedPlugin {
         return try result.get()
     }
 
-    /// Raw bundles are large and only needed for re-processing, so only the newest ones are kept.
-    static func pruneRawBundles(keeping limit: Int = 12) {
-        guard let items = try? FileManager.default.contentsOfDirectory(at: scanDirectory, includingPropertiesForKeys: [.creationDateKey]) else { return }
-        let created = { (url: URL) -> Date in (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast }
-        let bundles = items.filter { $0.lastPathComponent.hasSuffix("-raw") }.sorted { created($0) > created($1) }
-        for old in bundles.dropFirst(limit) { try? FileManager.default.removeItem(at: old) }
-    }
-
     static var scanDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("RoomformScans", isDirectory: true)
     }
@@ -205,6 +197,10 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
     private var wallPassCapture: (index: Int, json: URL)?
     private let hint = UILabel()
     private let measuring = DispatchGroup()   // ceilings being measured in the background
+    private var ceilingBudgets: [Int: CeilingWorkBudget] = [:]
+    private var ceilingFiles: [Int: URL] = [:]
+    private var finishDeadline: DispatchWorkItem?
+    private var finishResult: Result<[[String: Any]], Error>?
     private var finishing = false              // finish() has started; nothing new may begin
     private var spaceRestarted = false         // the photo step's camera switch restarted ARKit's coordinates
     // From iOS 17 the ARSession keeps running between rooms, so every room shares one coordinate space, unless the
@@ -254,6 +250,10 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
             // Raw recording is best-effort: a failure here must never block the RoomPlan scan itself.
             let folder = RoomScannerPlugin.scanDirectory.appendingPathComponent(roomId + "-raw", isDirectory: true)
             recorder = try? RawCaptureRecorder(session: captureView.captureSession.arSession, folder: folder)
+            recorder?.onGuidance = { [weak self] text in
+                guard let self = self, self.phase == .scanning else { return }
+                self.hint.isHidden = false; self.hint.text = "  " + text + "  "
+            }
             recorder?.start()
         }
     }
@@ -276,6 +276,7 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
     }
 
     @objc private func leftTapped() {
+        if finishing && !finished { completeFinish(deferred: true); return }
         guard !finished, !finishing else { return }
         if phase == .scanning { endScan("Scan cancelled") } else if phase == .wallPhotos { finishWallPhotos() } else if phase == .reviewing { startRoom() }
     }
@@ -302,19 +303,37 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
     }
     private func finish(_ result: Result<[[String: Any]], Error>) {
         guard !finishing else { return }
-        finishing = true
-        // Rooms whose ceiling is still being measured are handed over once it is done.
+        finishing = true; finishResult = result
         if wallPass != nil { finishWallPhotos() }
-        rightButton.setTitle("Measuring ceiling…", for: .normal); rightButton.isEnabled = false; leftButton.isEnabled = false
-        measuring.notify(queue: .main) {
-            guard !self.finished else { return }
-            self.finished = true; self.timeout?.invalidate()
-            let result: Result<[[String: Any]], Error> = { if case .success = result { return .success(self.captures) }; return result }()
-            // A recorder still present here belongs to a room that never completed.
-            self.recorder?.discard(); self.recorder = nil
-            self.captureView.captureSession.stop()
-            self.dismiss(animated: true) { self.completion?(result); self.completion = nil }
+        // Free the camera/GPU while CPU depth processing finishes. Never make
+        // saving an already-persisted room depend on an unbounded worker.
+        recorder?.discard(); recorder = nil
+        captureView.captureSession.stop()
+        rightButton.setTitle("Measuring ceiling…", for: .normal); rightButton.isEnabled = false
+        leftButton.setTitle("Save without ceiling", for: .normal); leftButton.isEnabled = true
+        hint.isHidden = false; hint.text = "Room saved. Ceiling processing will wait at most 15 seconds."
+        let deadline = DispatchWorkItem { [weak self] in self?.completeFinish(deferred: true) }
+        finishDeadline = deadline
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: deadline)
+        measuring.notify(queue: .main) { [weak self] in self?.completeFinish(deferred: false) }
+    }
+
+    private func completeFinish(deferred: Bool) {
+        guard !finished, let initial = finishResult else { return }
+        finished = true; finishDeadline?.cancel(); finishDeadline = nil
+        timeout?.invalidate()
+        for budget in ceilingBudgets.values { budget.cancel() }
+        if deferred {
+            for (index, url) in ceilingFiles where index < captures.count && captures[index]["ceiling"] == nil {
+                captures[index]["ceilingStatus"] = "deferred"
+                if let data = try? JSONSerialization.data(withJSONObject: captures[index], options: [.prettyPrinted, .sortedKeys]) {
+                    try? data.write(to: url, options: .atomic)
+                }
+            }
         }
+        let result: Result<[[String: Any]], Error> = { if case .success = initial { return .success(captures) }; return initial }()
+        finishResult = nil
+        dismiss(animated: true) { self.completion?(result); self.completion = nil }
     }
     /// The current room could not be built. With earlier rooms in hand, keep them and let the user continue.
     private func roomFailed(_ message: String) {
@@ -395,15 +414,34 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
                 return SIMD2(w.x, w.z)
             }
         }
-        let estimator = CeilingEstimator(walls: walls, floor: CeilingEstimator.floorOutline(walls: walls, floorCorners: corners))
-        measuring.enter()
+        var estimator = CeilingEstimator(walls: walls, floor: CeilingEstimator.floorOutline(walls: walls, floorCorners: corners))
+        estimator.openings = (room.doors + room.windows + room.openings).map { CeilingEstimator.Opening(transform: $0.transform, width: $0.dimensions.x, height: $0.dimensions.y) }
+        let budget = CeilingWorkBudget(seconds: 30)
+        ceilingBudgets[index] = budget; ceilingFiles[index] = json
+        captures[index]["ceilingStatus"] = "processing"
+        let group = measuring, started = ProcessInfo.processInfo.systemUptime
+        let diagnostics = URL(fileURLWithPath: raw).appendingPathComponent("ceiling-processing.json")
+        estimator.shouldCancel = { budget.shouldStop }
+        estimator.onProgress = { stage in
+            let record: [String: Any] = ["stage": stage, "elapsedSeconds": ProcessInfo.processInfo.systemUptime - started]
+            if let data = try? JSONSerialization.data(withJSONObject: record) { try? data.write(to: diagnostics, options: .atomic) }
+        }
+        group.enter()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let ceiling = estimator.estimate(raw: URL(fileURLWithPath: raw))
+            let stopped = budget.shouldStop
+            let status = stopped ? "deferred" : ceiling == nil ? "unavailable" : "complete"
+            let record: [String: Any] = ["stage": status, "elapsedSeconds": ProcessInfo.processInfo.systemUptime - started]
+            if let data = try? JSONSerialization.data(withJSONObject: record) { try? data.write(to: diagnostics, options: .atomic) }
             DispatchQueue.main.async {
-                defer { self?.measuring.leave() }
-                guard let self = self, let ceiling = ceiling, index < self.captures.count else { return }
-                self.captures[index]["ceiling"] = ceiling
-                if let data = try? JSONSerialization.data(withJSONObject: self.captures[index], options: [.prettyPrinted, .sortedKeys]) { try? data.write(to: json, options: .atomic) }
+                defer { group.leave() }
+                guard let self = self, !self.finished, index < self.captures.count else { return }
+                self.ceilingBudgets.removeValue(forKey: index)
+                self.captures[index]["ceilingStatus"] = status
+                if !stopped, let ceiling = ceiling { self.captures[index]["ceiling"] = ceiling }
+                if let data = try? JSONSerialization.data(withJSONObject: self.captures[index], options: [.prettyPrinted, .sortedKeys]) {
+                    try? data.write(to: json, options: .atomic)
+                }
             }
         }
     }
@@ -466,7 +504,7 @@ private final class RoomScanController: UIViewController, RoomCaptureViewDelegat
     private func matrix(_ value: simd_float4x4) -> [Float] {
         (0..<4).flatMap { column in (0..<4).map { row in value[column][row] } }
     }
-    deinit { timeout?.invalidate(); NotificationCenter.default.removeObserver(self) }
+    deinit { timeout?.invalidate(); finishDeadline?.cancel(); for budget in ceilingBudgets.values { budget.cancel() }; NotificationCenter.default.removeObserver(self) }
 }
 
 /// Guides the user to photograph each wall straight on and takes full-resolution stills automatically.
@@ -727,12 +765,18 @@ private func pixelBytes(_ buffer: CVPixelBuffer) -> Data {
 /// Polls `currentFrame` instead of becoming the ARSession delegate, which RoomPlan owns.
 @available(iOS 16.0, *)
 private final class RawCaptureRecorder {
-    static let maxFrames = 240
+    static let maxFrames = 360
     private let folder: URL
     private weak var session: ARSession?
     private let queue = DispatchQueue(label: "roomform.raw-capture", qos: .utility)
     private let context = CIContext()
     private let index: FileHandle
+    private let trackingIndex: FileHandle
+    var onGuidance: ((String) -> Void)?
+    private var lastTelemetry = -Double.infinity, lastSavedTime = -Double.infinity
+    private var previousSample: (pose: simd_float4x4, time: TimeInterval)?
+    private var limitedMappingSamples = 0, sampledFrames = 0
+    private var burstRemaining = 0, telemetryCount = 0
     private var timer: Timer?
     // Main thread only.
     private var busy = false, attempts = 0
@@ -742,12 +786,15 @@ private final class RawCaptureRecorder {
 
     init(session: ARSession, folder: URL) throws {
         self.session = session; self.folder = folder
-        for name in ["frames", "depth", "confidence"] {
+        for name in ["frames", "depth", "confidence", "features"] {
             try FileManager.default.createDirectory(at: folder.appendingPathComponent(name, isDirectory: true), withIntermediateDirectories: true)
         }
         let file = folder.appendingPathComponent("frames.jsonl")
         guard FileManager.default.createFile(atPath: file.path, contents: nil) else { throw CocoaError(.fileWriteUnknown) }
         index = try FileHandle(forWritingTo: file)
+        let trackingFile = folder.appendingPathComponent("tracking.jsonl")
+        guard FileManager.default.createFile(atPath: trackingFile.path, contents: nil) else { throw CocoaError(.fileWriteUnknown) }
+        trackingIndex = try FileHandle(forWritingTo: trackingFile)
     }
 
     func start() {
@@ -756,21 +803,83 @@ private final class RawCaptureRecorder {
     func stop() { timer?.invalidate(); timer = nil }
 
     private func sample() {
-        guard !busy, attempts < Self.maxFrames, let frame = session?.currentFrame else { return }
-        guard case .normal = frame.camera.trackingState else { return }
+        guard let frame = session?.currentFrame else { return }
+        let tracking = Self.trackingName(frame.camera.trackingState)
         let pose = frame.camera.transform
-        if let last = lastPose {
-            // Keyframe only after ~25 cm of travel or ~15 degrees of turn, to bound storage.
-            let moved = simd_distance(last.columns.3, pose.columns.3) > 0.25
-            let turned = simd_dot(simd_make_float3(last.columns.2), simd_make_float3(pose.columns.2)) < 0.966
-            guard moved || turned else { return }
+        var speed: Float = 0, angularSpeed: Float = 0
+        if let before = previousSample, frame.timestamp > before.time {
+            let seconds = Float(frame.timestamp - before.time)
+            speed = simd_distance(simd_make_float3(pose.columns.3), simd_make_float3(before.pose.columns.3)) / seconds
+            let a = simd_float3x3(simd_make_float3(pose.columns.0), simd_make_float3(pose.columns.1), simd_make_float3(pose.columns.2))
+            let b = simd_float3x3(simd_make_float3(before.pose.columns.0), simd_make_float3(before.pose.columns.1), simd_make_float3(before.pose.columns.2))
+            let rotation = b.transpose * a
+            angularSpeed = acos(max(-1, min(1, (rotation[0][0] + rotation[1][1] + rotation[2][2] - 1) / 2))) * 180 / .pi / seconds
         }
-        lastPose = pose; busy = true; attempts += 1
+        previousSample = (pose, frame.timestamp)
+        // Record limited/unavailable tracking too; previous bundles silently omitted it.
+        if frame.timestamp - lastTelemetry >= 0.5 && telemetryCount < 7200 {
+            let gap = lastTelemetry.isFinite ? frame.timestamp - lastTelemetry : 0
+            lastTelemetry = frame.timestamp; telemetryCount += 1
+            sampledFrames += 1
+            if frame.worldMappingStatus == .limited || frame.worldMappingStatus == .notAvailable { limitedMappingSamples += 1 }
+            let record: [String: Any] = ["timestamp": frame.timestamp, "tracking": tracking,
+                "worldMapping": String(describing: frame.worldMappingStatus), "sampleGapSeconds": gap,
+                "mappingState": Self.mappingName(frame.worldMappingStatus), "featureCount": frame.rawFeaturePoints?.points.count ?? 0,
+                "speedMetersPerSecond": speed, "angularSpeedDegreesPerSecond": angularSpeed,
+                "recordingLimitReached": attempts >= Self.maxFrames]
+            if var data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]) {
+                data.append(0x0A)
+                let line = data
+                queue.async { [weak self] in try? self?.trackingIndex.write(contentsOf: line) }
+            }
+        }
+        guard case .normal = frame.camera.trackingState else {
+            onGuidance?("Tracking limited. Pause and face an area already scanned.")
+            return
+        }
+        if attempts >= Self.maxFrames {
+            onGuidance?("Depth recording is full. Finish this room; repeat-view accuracy still needs review.")
+            return
+        }
+        if frame.worldMappingStatus == .limited || frame.worldMappingStatus == .notAvailable {
+            onGuidance?("Map is weak. Pause and face a textured corner already scanned; include floor and wall together.")
+        } else if angularSpeed > 20 || speed > 0.5 {
+            onGuidance?("Slow down and pause at the corner before turning. Fast motion reduces repeat-view quality.")
+        } else {
+            onGuidance?("Cover floor and ceiling; revisit the same starting corner at the same angle. Glass needs independent measurement.")
+        }
+        guard !busy, frame.timestamp - lastSavedTime >= 0.35 else { return }
+        if let last = lastPose {
+            let moved = simd_distance(last.columns.3, pose.columns.3) > 0.15
+            let turned = simd_dot(simd_make_float3(last.columns.2), simd_make_float3(pose.columns.2)) < 0.9903
+            if moved || turned { burstRemaining = 2; lastPose = pose }
+            else if burstRemaining > 0 { burstRemaining -= 1 }
+            else { return }
+        } else { lastPose = pose; burstRemaining = 2 }
+        lastSavedTime = frame.timestamp; busy = true; attempts += 1
         let number = attempts
         // Holds one ARFrame at a time; `busy` stops a backlog that would starve ARKit of buffers.
         queue.async { [weak self] in
             self?.write(frame, number: number)
             DispatchQueue.main.async { self?.busy = false }
+        }
+    }
+
+    private static func trackingName(_ state: ARCamera.TrackingState) -> String {
+        switch state {
+        case .normal: return "normal"
+        case .notAvailable: return "unavailable"
+        case .limited(let reason): return "limited:\(String(describing: reason))"
+        }
+    }
+
+    private static func mappingName(_ state: ARFrame.WorldMappingStatus) -> String {
+        switch state {
+        case .notAvailable: return "unavailable"
+        case .limited: return "limited"
+        case .extending: return "extending"
+        case .mapped: return "mapped"
+        @unknown default: return "unknown"
         }
     }
 
@@ -789,8 +898,19 @@ private final class RawCaptureRecorder {
             }
         }
         let camera = frame.camera, m = camera.transform, k = camera.intrinsics
+        var hasFeatures = false
+        if let cloud = frame.rawFeaturePoints {
+            // Keep feature identities for future geometric revisit checks. No image service is called.
+            let features: [String: Any] = ["ids": cloud.identifiers.map { String($0) },
+                "points": cloud.points.map { [$0.x, $0.y, $0.z] }, "timestamp": frame.timestamp]
+            if let data = try? JSONSerialization.data(withJSONObject: features),
+               (try? data.write(to: folder.appendingPathComponent("features/\(name).json"), options: .atomic)) != nil { hasFeatures = true }
+        }
         let record: [String: Any] = [
             "frame": name, "timestamp": frame.timestamp, "depth": hasDepth,
+            "tracking": Self.trackingName(camera.trackingState), "worldMapping": String(describing: frame.worldMappingStatus),
+            "mappingState": Self.mappingName(frame.worldMappingStatus), "features": hasFeatures,
+            "featureCount": frame.rawFeaturePoints?.points.count ?? 0,
             "cameraToWorld": (0..<4).flatMap { column in (0..<4).map { row in m[column][row] } },
             "intrinsics": (0..<3).flatMap { column in (0..<3).map { row in k[column][row] } },
             "imageWidth": Int(camera.imageResolution.width), "imageHeight": Int(camera.imageResolution.height)
@@ -806,7 +926,7 @@ private final class RawCaptureRecorder {
     func finish(scanId: String) -> [String: Any]? {
         stop()
         var counts = (frames: 0, depth: 0, size: [Int]())
-        queue.sync { counts = (saved, depthSaved, depthSize); try? index.close() }
+        queue.sync { counts = (saved, depthSaved, depthSize); try? index.close(); try? trackingIndex.close() }
         guard counts.frames > 0 else { discard(); return nil }
         let manifest: [String: Any] = [
             "version": 1, "scanId": scanId, "createdAt": ISO8601DateFormatter().string(from: Date()),
@@ -816,6 +936,11 @@ private final class RawCaptureRecorder {
             "depthFormat": "depth/<frame>.bin, little-endian float32 meters, row-major, depthSize = [width, height]",
             "confidenceFormat": "confidence/<frame>.bin, uint8 per pixel: 0 low, 1 medium, 2 high",
             "index": "frames.jsonl, one JSON object per saved frame",
+            "trackingIndex": "tracking.jsonl, tracking state and gaps every 0.5 seconds including limited tracking",
+            "sampling": "15 cm or 8 degrees, with two additional repeat frames at >=0.35 second intervals",
+            "recordingLimitReached": attempts >= Self.maxFrames,
+            "mappingSamples": sampledFrames, "limitedMappingSamples": limitedMappingSamples,
+            "featuresFormat": "features/<frame>.json, ARKit feature ids and world positions at capture time; not ground truth",
             "pose": "cameraToWorld is a column-major 4x4 in the ARKit world space of the RoomPlan session (meters, Y up)",
             "intrinsicsFormat": "column-major 3x3 in pixels at imageWidth x imageHeight; scale to depthSize for depth"
         ]
@@ -827,6 +952,6 @@ private final class RawCaptureRecorder {
     func discard() {
         stop()
         let folder = self.folder
-        queue.async { try? FileManager.default.removeItem(at: folder) }
+        queue.async { [self] in try? index.close(); try? trackingIndex.close(); try? FileManager.default.removeItem(at: folder) }
     }
 }

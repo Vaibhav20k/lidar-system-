@@ -32,6 +32,8 @@ export const fixtureSchema = z.object({
 const outline = z.array(pointSchema).min(3).max(128);
 export const ceilingSchema = z.object({
   height: number.min(1).max(12), coverage: number.min(0).max(1).optional(),
+  measurementDiagnostics: z.object({ method: z.string().max(80), heightDatum: z.string().max(120),
+    repeatSpreadP90Meters: number.min(0).max(20), repeatCoverage: number.min(0).max(1).optional(), absoluteAccuracyVerified: z.literal(false) }).optional(),
   regions: z.array(z.object({ points: outline, holes: z.array(outline).max(32).optional(), height: number.min(0.5).max(12), evidence: evidenceSchema })).max(64),
   // Lights, holes and boxes on the ceiling or under a lower region: world X/Z, the height of the surface they sit on, and a footprint turned by `rotation`.
   items: z.array(z.object({ id, kind: fixtureKind, x: number.min(-500).max(500), z: number.min(-500).max(500), height: number.min(0.5).max(12), width: number.min(0.02).max(3), depth: number.min(0.02).max(3), rotation: number,
@@ -56,6 +58,11 @@ export const roomSchema = z.object({
   openings: z.array(openingSchema).max(128), objects: z.array(objectSchema).max(256),
   fixtures: z.array(fixtureSchema).max(256).optional(), ceiling: ceilingSchema.optional(),
   notes: z.string().max(5000).default(''), warnings: z.array(z.string().max(500)).max(50).default([]),
+  measurementQuality: z.object({
+    version: z.string().max(40), status: z.enum(['consistent', 'needs-rescan']),
+    targetMeters: z.number().positive(), reasons: z.array(z.string().max(500)).max(50),
+    applied: z.array(z.enum(['walls', 'floor-ceiling'])),
+  }).optional(),
   originalUsdzPath: z.string().max(2000).optional(),
 });
 export type Room = z.infer<typeof roomSchema>;

@@ -7,6 +7,11 @@ import { buildRoomGroup, disposeGroup } from '../src/scene/buildRoom';
 import * as THREE from 'three';
 
 describe('room geometry', () => {
+  it('preserves geometry quality when importing and exporting a room', () => {
+    const quality = {version:'geometry-qa-v1',status:'needs-rescan',targetMeters:.02,reasons:['Repeat views disagree'],applied:[]};
+    expect(parseRoom({...newRoom('Checked'),measurementQuality:quality}).measurementQuality).toEqual(quality);
+    expect(() => parseRoom({...newRoom('Invalid'),measurementQuality:{...quality,status:'accurate'}})).toThrow();
+  });
   it('preserves a concave floor without filling in the missing region', () => {
     const floor = [{x:0,z:0},{x:5,z:0},{x:5,z:2},{x:2,z:2},{x:2,z:4},{x:0,z:4}];
     const room = parseRoom({...newRoom('L room'), floor, walls:wallsFromFloor(floor,2.7,'measured')});
@@ -151,6 +156,22 @@ describe('wall sides, platforms and beams', () => {
 });
 
 describe('native measurement normalization', () => {
+  it('preserves ceiling disagreement and never calls an unverified height accurate', () => {
+    const room = normalizeCapture({...appleCapture(), ceiling: {height: 3.278, regions: [],
+      measurementDiagnostics: {method: 'frame-balanced-median-v2', heightDatum: 'RoomPlan floor',
+        repeatSpreadP90Meters: .127, repeatCoverage: .4, absoluteAccuracyVerified: false}}}, 'Repeat check');
+    expect(room.ceiling?.measurementDiagnostics?.repeatSpreadP90Meters).toBe(.127);
+    expect(room.warnings.join(' ')).toContain('12.7 cm');
+    expect(room.warnings.join(' ')).toContain('Less than half');
+    expect(room.measurementQuality?.status).toBe('needs-rescan');
+  });
+  it('keeps a saved room usable when ceiling processing is deferred', () => {
+    const room = normalizeCapture({...appleCapture(),ceilingStatus:'deferred'},'Saved scan');
+    expect(room.walls).toHaveLength(4);
+    expect(room.ceiling).toBeUndefined();
+    expect(room.warnings.join(' ')).toContain('ceiling processing was deferred');
+    expect(room.measurementQuality?.status).toBe('needs-rescan');
+  });
   it('converts column-major Apple matrices, openings and object yaw to meters', () => {
     const raw=appleCapture();
     raw.openings=[{id:crypto.randomUUID(),kind:'window',transform:matrix(2,1.6,0),width:1.4,height:1,depth:0}];
