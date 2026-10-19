@@ -45,3 +45,9 @@ Validation: 51 Python tests pass. Full adaptive TSDF/mesh reconstruction and top
 Added independent-frame, multi-height cross-section persistence with wall-plane exclusion. Fully supported rectangular sides and broad circular arcs retain their different shapes; open profiles stay unknown-structural candidates with inferred faces. Source frame IDs and observed vertical extent are retained; no hidden extension to floor/ceiling is asserted.
 
 Validation: 54 Python tests pass, including rectangular/circular shapes, separate columns, short furniture and single-frame rejection. General concave/tapered profiles, attached-column recovery and tall-furniture discrimination remain incomplete. Real recall and dimensional accuracy have not been qualified.
+
+## Phase 8 — beam and soffit candidates
+
+Added connected underside-footprint proposals with independent-frame support, actual height-gap splitting and preserved polygon boundaries. Multiple overhead runs survive. Candidate depth to the ceiling is explicitly inferred, not measured. Main ceiling surfaces do not become beams. Hole-bearing regions are withheld instead of filled.
+
+Validation: 56 Python tests pass, including separate beams, ceiling exclusion and single-frame rejection. Sloped beams, validated side-plane intersections, hole/mesh geometry and junction topology remain incomplete; no zero-miss guarantee is made.

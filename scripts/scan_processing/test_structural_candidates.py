@@ -1,6 +1,6 @@
 import unittest
 import numpy as np
-from structural_candidates import columns
+from structural_candidates import columns,beams
 
 
 def samples(circle=False):
@@ -36,3 +36,23 @@ class ColumnTests(unittest.TestCase):
         p,n,f=samples()
         found=columns(np.concatenate([p,p+[2,0,0]]),np.tile(n,(2,1)),np.tile(f,2))
         self.assertEqual(len(found),2)
+
+
+class BeamTests(unittest.TestCase):
+    def test_separate_overhead_runs_and_inferred_depth(self):
+        p=[];f=[]
+        for frame in [2,8]:
+            for x in np.arange(.01,2,.03):
+                for z in np.arange(.01,.4,.03):
+                    for offset in [0,3]:p.append([x+offset,2.5,z]);f.append(frame)
+        p=np.array(p);n=np.tile([0,-1,0],(len(p),1))
+        result=beams(p,n,f,3)
+        self.assertEqual(len(result),2)
+        self.assertTrue(all(v['kind']=='beam' for v in result))
+        self.assertTrue(all(v['geometry']['length']==.5 for v in result))
+        self.assertTrue(all('top' in v['coverage']['inferredFaces'] for v in result))
+        self.assertEqual(beams(p,n,np.zeros(len(p)),3),[])
+
+    def test_main_ceiling_is_not_a_beam(self):
+        p=np.array([[x,3,z] for x in np.arange(0,2,.02) for z in np.arange(0,.4,.02)])
+        self.assertEqual(beams(p,np.tile([0,-1,0],(len(p),1)),np.arange(len(p))%2,3),[])

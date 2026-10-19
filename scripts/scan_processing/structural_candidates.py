@@ -108,3 +108,48 @@ def columns(points,normals,frames,walls=(),capture_id=None,cell=.06):
                 value['coverage']={'status':'partial','observedFaces':['lateral'],'inferredFaces':['bottom','top']}
         found.append(value)
     return found
+
+
+def beams(points,normals,frames,ceiling_height,capture_id=None,cell=.06):
+    """Separate connected observed underside footprints and retain concavity.
+
+    This horizontal-underside detector does not fit sloped beams. Regions with
+    holes are withheld until the canonical geometry can represent those holes.
+    """
+    points,normals,frames=np.asarray(points),np.asarray(normals),np.asarray(frames)
+    if not len(points) or ceiling_height is None:return []
+    keep=(normals[:,1]<-.85)&(points[:,1]>1.6)&(points[:,1]<ceiling_height-.06)
+    p,f=points[keep],frames[keep]
+    if not len(p):return []
+    # Split measured levels at actual gaps, rather than arbitrary bin borders.
+    order=np.argsort(p[:,1]);splits=np.flatnonzero(np.diff(p[order,1])>.05)+1
+    found=[]
+    for level_indices in np.split(order,splits):
+        q,source=p[level_indices],f[level_indices]
+        if np.ptp(q[:,1])>.08:continue
+        cells=np.floor(q[:,[0,2]]/cell).astype(int)
+        unique,inverse=np.unique(cells,axis=0,return_inverse=True)
+        support=np.unique(np.column_stack([inverse,source]),axis=0)
+        counts=np.bincount(support[:,0].astype(int),minlength=len(unique))
+        for group in components(unique[counts>=2]):
+            if len(group)<12:continue
+            low=group.min(axis=0);high=group.max(axis=0)
+            if np.prod(high-low+3)>2_000_000:continue
+            mask=np.zeros(tuple((high-low+3)[::-1]),np.uint8)
+            pixels=group-low+1;mask[pixels[:,1],pixels[:,0]]=255
+            contours,hierarchy=cv2.findContours(mask,cv2.RETR_CCOMP,cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:continue
+            outer=max(range(len(contours)),key=lambda i:cv2.contourArea(contours[i]))
+            if hierarchy[0,outer,2]!=-1:continue
+            outline=cv2.approxPolyDP(contours[outer],.25,True)[:,0,:]
+            if not 3<=len(outline)<=128:continue
+            profile=(outline+low-1+.5)*cell
+            rect=cv2.minAreaRect(profile.astype(np.float32));width,length=sorted(rect[1])
+            if width<.1 or length<.3:continue
+            cell_index={tuple(c):i for i,c in enumerate(unique)}
+            selected=np.isin(inverse,[cell_index[tuple(c)] for c in group])
+            underside=float(np.median(q[selected,1]))
+            kind='beam' if length>=2.2*width and width<=1.3 else 'soffit'
+            found.append(element(kind,profile,underside,float(ceiling_height),source[selected],capture_id,
+                                 ['underside'],['top','sides','ends']))
+    return found
