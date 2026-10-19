@@ -51,3 +51,9 @@ Validation: 54 Python tests pass, including rectangular/circular shapes, separat
 Added connected underside-footprint proposals with independent-frame support, actual height-gap splitting and preserved polygon boundaries. Multiple overhead runs survive. Candidate depth to the ceiling is explicitly inferred, not measured. Main ceiling surfaces do not become beams. Hole-bearing regions are withheld instead of filled.
 
 Validation: 56 Python tests pass, including separate beams, ceiling exclusion and single-frame rejection. Sloped beams, validated side-plane intersections, hole/mesh geometry and junction topology remain incomplete; no zero-miss guarantee is made.
+
+## Phase 9 — processing and persistence integration
+
+Structural candidates now run on the same corrected observations and floor datum as geometry QA, retain capture identity and survive server result parsing. Jobs persist across restart (interrupted work is marked failed, never silently successful); stages have time limits. Raw uploads are staged and validated before placement, cannot overwrite retained captures and use bounded traversal-safe extraction. A delayed processing result cannot overwrite a changed/deleted saved room.
+
+Validation: 58 Python tests, 35 TypeScript/API tests and production build pass. Raw archive traversal/no-overwrite, job restart and capture identity are tested. Reprocessing retained bundles uses the process endpoint; durable automatic job resumption and native device end-to-end processing remain pending.

@@ -3,7 +3,7 @@ import { ScanLine, Plus, ArrowUpRight, Box, Layers2, Download, Upload, Settings2
 import { addDrawn, confirmElement, describeElement, fixtureLabel, floorArea, needsCheck, newRoom, parseRoom, perimeter, removeElement, type DrawnKind, type Room } from './domain/room';
 import { sampleRoom } from './domain/sample';
 import { normalizeCapture } from './domain/native';
-import { listRooms, saveRoom, deleteRoom, syncRoom, pullRooms } from './services/storage';
+import { listRooms, saveRoom, saveProcessedRoom, deleteRoom, syncRoom, pullRooms } from './services/storage';
 import { captureCapabilities, enhanceRoom, scanRooms, RoomScanner } from './services/capture';
 import FloorPlan from './components/FloorPlan';
 import WallElevation, { PointsTable } from './components/WallElevation';
@@ -71,7 +71,8 @@ export default function App() {
       try {
         setNotice({ text: `Sending scan to the server${label}…`, busy: true });
         const result = await enhanceRoom(original, sources[index], server, token, stage => setNotice({ text: `${stage}${label}…`, busy: true }));
-        await saveRoom(result.room); setRooms(await listRooms());
+        const applied=await saveProcessedRoom(original,result.room); setRooms(await listRooms());
+        if(!applied) { setNotice({text:`${original.name}: processing finished, but saved edits were preserved. The result remains on the server. Check those edits before reprocessing.`}); continue; }
         // Only swap the room on screen if the user is still looking at this one and has not started editing it.
         setRoom(current => current.id === result.room.id && current.updatedAt === original.updatedAt ? result.room : current);
         const found = [result.room.ceiling ? 'ceiling measured' : '', result.room.fixtures?.length ? `${result.room.fixtures.length} wall fixture(s)` : '', result.room.ceiling?.items?.length ? `${result.room.ceiling.items.length} ceiling item(s)` : ''].filter(Boolean).join(', ');

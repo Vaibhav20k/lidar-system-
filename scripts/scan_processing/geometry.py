@@ -73,6 +73,9 @@ def surface(points, normals, frames, outline, height, upward):
 
 
 def shift_datum(room, delta):
+    for element in room.get('structures',[]):
+        element['origin']['y']-=delta
+        element['quality']={'absoluteAccuracyVerified':False,'status':'unverified'}
     for wall in room['walls']:
         wall['height'] -= delta
     for opening in room.get('openings', []):
@@ -188,6 +191,22 @@ def refine(capture, raw, source):
     room['measurementQuality'] = {'version': VERSION, 'status': 'needs-rescan' if len(reasons) > 1 else 'consistent',
                                   'targetMeters': .02, 'reasons': reasons, 'applied': report['applied']}
     report['quality'] = room['measurementQuality']
+    from structural_candidates import columns,beams,VERSION as STRUCTURE_VERSION
+    local_points=points.copy()
+    datum=floor['heightAtCentre'] if 'floor-ceiling' in report['applied'] else floor_y
+    local_points[:,1]-=datum
+    # Keep segmentation bounded to this room; use original observations for
+    # profile proposals and retain their frame membership.
+    selected=inside(local_points,outline)
+    candidates=columns(local_points[selected],normals[selected],frames[selected],room['walls'],room.get('captureId'))
+    candidates+=beams(local_points[selected],normals[selected],frames[selected],(room.get('ceiling') or {}).get('height'),room.get('captureId'))
+    retained=[e for e in room.get('structures',[]) if e['provenance']['processingVersion']!=STRUCTURE_VERSION or e['review']!='candidate']
+    existing={e['id'] for e in retained}
+    candidates=[e for e in candidates if e['id'] not in existing]
+    room['structures']=(retained+candidates)[:256]
+    report['structures']={'candidates':len(candidates),'retained':len(retained),'omittedByLimit':max(0,len(retained)+len(candidates)-256),
+                          'complete':False,'absoluteAccuracyVerified':False}
+    room['schemaVersion']=2
     room['warnings'] = [s for s in room.get('warnings', []) if not s.startswith('2 cm check:')][:49] + [
         '2 cm check: accuracy is not verified. ' + '; '.join(reasons)[:420]]
     return room, report

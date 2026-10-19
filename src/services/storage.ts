@@ -6,6 +6,16 @@ const database = () => connection ??= openDB<RoomDB>('roomform-v1', 1, { upgrade
 const portable = (room: Room) => ({ ...room, originalUsdzPath: undefined });
 export async function listRooms() { const db = await database(); const rooms = await db.getAll('rooms'); return rooms.map(parseRoom).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)); }
 export async function saveRoom(room: Room) { const validated = parseRoom(room); await (await database()).put('rooms', validated); }
+// Compare and write inside one transaction so a delayed processing response
+// cannot overwrite an edited or deleted saved room.
+export async function saveProcessedRoom(original: Room, result: Room): Promise<boolean> {
+  const validated=parseRoom(result),db=await database(),tx=db.transaction('rooms','readwrite');
+  const current=await tx.store.get(original.id);
+  const matches=current && JSON.stringify(parseRoom(current))===JSON.stringify(parseRoom(original));
+  if(matches && validated.id===original.id) await tx.store.put(validated);
+  await tx.done;
+  return Boolean(matches && validated.id===original.id);
+}
 export async function deleteRoom(id: string) { const db = await database(); const tx = db.transaction(['rooms', 'sync'], 'readwrite'); await tx.objectStore('rooms').delete(id); await tx.objectStore('sync').delete(id); await tx.done; }
 export async function syncRoom(room: Room, server: string, token: string) {
   const db = await database(); const previous = await db.get('sync', room.id);
