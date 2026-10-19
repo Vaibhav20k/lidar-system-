@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "description": "Synthetic scoring smoke test only; not phone accuracy evidence.",
+  "scoring": {"toleranceMeters": 0.02, "matchDistanceMeters": 0.25},
+  "cases": [
+    {"id": "synthetic-exact", "physicalRoomId": "synthetic-1", "partition": "development", "sharedFrame": true, "prediction": "fixtures/exact.json", "reference": "fixtures/reference.json"},
+    {"id": "synthetic-wrong", "physicalRoomId": "synthetic-1", "partition": "development", "sharedFrame": true, "prediction": "fixtures/wrong.json", "reference": "fixtures/reference.json"}
+  ]
+}

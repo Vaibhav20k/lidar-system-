@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Roomform structural scoring manifest v1",
+  "type": "object",
+  "required": ["version", "scoring", "cases"],
+  "properties": {
+    "version": {"const": 1},
+    "description": {"type": "string"},
+    "scoring": {
+      "type": "object",
+      "required": ["toleranceMeters", "matchDistanceMeters"],
+      "properties": {
+        "toleranceMeters": {"type": "number", "exclusiveMinimum": 0},
+        "matchDistanceMeters": {"type": "number", "exclusiveMinimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "cases": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/case"}}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "points": {"type": "array", "minItems": 3, "items": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "number"}}},
+    "case": {
+      "type": "object",
+      "required": ["id", "physicalRoomId", "partition", "prediction", "reference"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "physicalRoomId": {"type": "string", "minLength": 1},
+        "partition": {"enum": ["development", "tuning", "holdout"]},
+        "prediction": {"type": "string", "minLength": 1},
+        "reference": {"type": "string", "minLength": 1},
+        "sharedFrame": {"const": true},
+        "controls": {
+          "type": "object", "required": ["prediction", "reference", "maxResidualMeters"],
+          "properties": {
+            "prediction": {"$ref": "#/$defs/points"},
+            "reference": {"$ref": "#/$defs/points"},
+            "maxResidualMeters": {"type": "number", "exclusiveMinimum": 0}
+          }, "additionalProperties": false
+        }
+      },
+      "oneOf": [{"required": ["sharedFrame"], "not": {"required": ["controls"]}}, {"required": ["controls"], "not": {"required": ["sharedFrame"]}}],
+      "additionalProperties": false
+    }
+  }
+}

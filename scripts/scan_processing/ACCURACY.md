@@ -1,5 +1,9 @@
 # Local geometry accuracy checks
 
+## Phase 0 benchmark foundation — 19 October 2026
+
+The new [benchmark protocol](../../verification/benchmark/README.md) separates structural scoring from estimation, adds synthetic scoring regressions and preserves the former four-scan replay as a named manifest. It reports missing/extra instances, class confusions, named dimensions with reference uncertainty, rigid-control alignment and repeatability. Shape and coverage are explicitly not scored yet. No new physical accuracy result is claimed.
+
 Run with Python + NumPy + OpenCV. No network/API requests are made by these commands.
 
 ```sh

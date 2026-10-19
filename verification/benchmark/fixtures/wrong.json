@@ -1,0 +1,4 @@
+{"version":1,"units":"meters","elements":[
+  {"id":"prediction-1","kind":"column","center":[1,1.5,1],"dimensions":{"width":0.43,"depth":0.5,"height":3}},
+  {"id":"extra","kind":"beam","center":[4,2.8,4],"dimensions":{"width":0.3,"depth":0.4,"length":4}}
+]}

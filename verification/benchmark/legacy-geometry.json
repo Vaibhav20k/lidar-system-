@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "description": "Historical four-scan replay. References are legacy room extents, not beam/column ground truth.",
+  "cases": [
+    {"id": "E5E54DAD-2A4D-4718-ADCB-8C4A7A22A6F7", "label": "15:39", "group": "same-room", "reference": "references/legacy-main.json"},
+    {"id": "045BFE29-E2F5-47E0-B0AE-81CCF669CC5E", "label": "16:48", "group": "same-room", "reference": "references/legacy-main.json"},
+    {"id": "03D3CDA8-BB44-4C2F-8778-C031E0D5590B", "label": "16:50", "group": "same-room", "reference": "references/legacy-main.json"},
+    {"id": "80F17D3B-8897-4652-9969-9C85580A612B", "label": "15:28", "group": "other-room", "reference": "references/legacy-other.json"}
+  ]
+}
