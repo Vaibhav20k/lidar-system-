@@ -29,6 +29,12 @@ class BenchmarkTests(unittest.TestCase):
         self.assertFalse(score['basicChecksPassed'])
         self.assertAlmostEqual(score['dimensionSummary']['worstMeters'], .03)
 
+    def test_correct_guessed_dimension_does_not_pass_measurement_gate(self):
+        self.prediction['elements'][0]['inferredDimensions']=['width']
+        score=score_case(self.prediction,self.reference,CONFIG)
+        self.assertFalse(score['basicChecksPassed'])
+        self.assertEqual(score['dimensionSummary']['missing'],1)
+
     def test_uncertainty_consumes_budget(self):
         self.assertTrue(dimension_score(1.015, 1, .005)['passed'])
         self.assertFalse(dimension_score(1.016, 1, .005)['passed'])

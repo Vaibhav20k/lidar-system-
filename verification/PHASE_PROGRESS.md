@@ -63,3 +63,15 @@ Validation: 58 Python tests, 35 TypeScript/API tests and production build pass. 
 Polygon extrusions (including concave profiles), circular columns and varying polygon sections derive their 3D surfaces from canonical geometry. Supported and inferred faces have distinct opacity. Candidates appear in the floor plan and inspector, can be focused, edited, kept or rejected, and retain evidence after rejection. Confirmation never sets absolute accuracy. GLB carries structural geometry and provenance in node extras; JSON/SVG use the same model.
 
 Validation: 38 TypeScript/API tests, production build and all three Chrome end-to-end tests pass. Tests check concave cap area, rotation/radius, rejection visibility, persistent review and actual GLB geometry metadata. Full profile-vertex editing, wall-elevation overlays and inferred-face measurement snapping remain pending.
+
+## Phase 11 — learned proposals decision
+
+Deferred, as this phase is conditional on labeled data and measured benefit. No model weights were downloaded and no training or ML accuracy claim is made. The required development/holdout experiment is documented in ACCURACY_QUALIFICATION.md.
+
+## Phase 12 — automation and qualification handoff
+
+Added push/PR CI for Python geometry, web tests/build/browser checks and existing native builds. Added canonical-room benchmark export and an explicit inferred-dimension gate: a numerically correct guess cannot pass a measurement test. Closed concave column outlines now refit source-supported planes after raster topology proposal; the L-profile regression preserves its reentrant corner. Inferred display faces can be selected for review but cannot be used as measurement surfaces.
+
+Validation: 61 Python tests, 38 TypeScript/API tests, three Chrome end-to-end tests and production build pass locally. Scoring smoke: one intended pass and one intended failure, with releaseQualified false. Remote CI/native build results must be checked separately.
+
+The full original plan is NOT complete: phases 3–8 and 10 retain the engineering gaps listed above; phase 11 is conditional/deferred and physical phase-12 qualification is blocked on scans/reference measurements from the other system. See ACCURACY_QUALIFICATION.md for the remaining gates and exact replay procedure. No maximum-accuracy or zero-miss guarantee is established.

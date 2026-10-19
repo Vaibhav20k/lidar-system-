@@ -42,6 +42,9 @@ def validate_observation(document, reference=False):
             finite(v)
         if not isinstance(element.get('dimensions'), dict):
             raise ValueError('Expected named dimensions')
+        inferred=element.get('inferredDimensions',[])
+        if not isinstance(inferred,list) or any(name not in element['dimensions'] for name in inferred):
+            raise ValueError('Inferred dimensions must name supplied dimensions')
         for value in element['dimensions'].values():
             if finite(value) <= 0:
                 raise ValueError('Dimensions must be positive')
@@ -79,7 +82,7 @@ def score_case(prediction, reference, config):
     for j, ref in enumerate(refs):
         pair = paired_refs.get(j)
         pred = preds[pair[0]] if pair else None
-        dimensions = {name: dimension_score(pred['dimensions'].get(name) if pred else None,
+        dimensions = {name: dimension_score(pred['dimensions'].get(name) if pred and name not in pred.get('inferredDimensions',[]) else None,
                                              target, ref.get('uncertaintyMeters', 0), tolerance)
                       for name, target in ref['dimensions'].items()}
         dimension_scores.extend(dimensions.values())

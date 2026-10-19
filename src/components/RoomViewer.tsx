@@ -223,7 +223,7 @@ export default function RoomViewer({ room, furniture, cutaway, ceiling, selected
         raycaster.params.Points = { threshold: voxel * 1.2 };
         return raycaster.intersectObject(scanned, true).find(h => h.object instanceof THREE.Points && (h.object.material as THREE.Material).opacity > 0.5);
       }
-      return raycaster.intersectObject(group, true).find(h => h.object instanceof THREE.Mesh && !Array.isArray(h.object.material) && h.object.material.opacity > 0.5);
+      return raycaster.intersectObject(group, true).find(h => h.object instanceof THREE.Mesh && !Array.isArray(h.object.material) && (h.object.material.opacity > 0.5 || h.object.userData.inferred===true));
     };
     const owner = (object: THREE.Object3D | null): string => { for (let o = object; o; o = o.parent) if (o.userData.elementId) return o.userData.elementId; return ''; };
 
@@ -249,6 +249,7 @@ export default function RoomViewer({ room, furniture, cutaway, ceiling, selected
     // and only to corners and edges close to the surface under the pointer, so a corner hidden behind that surface cannot grab it.
     const resolve = (clientX: number, clientY: number): { point: THREE.Vector3; snap: '' | 'corner' | 'edge' } | null => {
       const hit = pick(clientX, clientY), surface = hit?.point.clone() ?? raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), new THREE.Vector3());
+      if(hit?.object.userData.inferred===true)return null;
       if (!surface) return null;
       const rect = canvas.getBoundingClientRect(), px = clientX - rect.left, py = clientY - rect.top, projected = new THREE.Vector3();
       const pixels = (point: THREE.Vector3) => { projected.copy(point).project(camera); return projected.z > 1 ? Infinity : Math.hypot((projected.x + 1) / 2 * rect.width - px, (1 - projected.y) / 2 * rect.height - py); };
@@ -437,7 +438,7 @@ export default function RoomViewer({ room, furniture, cutaway, ceiling, selected
               band.visible = true; band.geometry.setFromPoints([marks[0], placed.point]);
               text = `${marks[0].distanceTo(placed.point).toFixed(2)} m${lock} · click to finish`;
             } else text = `Click the first point${lock}`;
-          }
+          } else if(pick(hover.x,hover.y)?.object.userData.inferred===true) text='Inferred face: select an observed surface to measure';
         } else {
           const hit = pick(hover.x, hover.y);
           text = !hit ? '' : hit.object instanceof THREE.Points ? `Scanned surface · ${hit.point.y.toFixed(2)} m above the floor` : describeElement(room, owner(hit.object));

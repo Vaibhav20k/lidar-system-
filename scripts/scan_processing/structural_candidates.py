@@ -11,6 +11,51 @@ import numpy as np
 VERSION='depth-structure-v1'
 
 
+def supported_polygon(xz,normals,frames,cell=.03):
+    """Recover a closed concave outline, then refit its lines to source points.
+
+    Rasterization only proposes topology. Intersections of median source planes
+    set vertices; no raster cell is reported as a precise measured edge.
+    """
+    xz=np.asarray(xz,float);normals=np.asarray(normals,float)
+    low=xz.min(axis=0)-cell
+    pixels=np.floor((xz-low)/cell).astype(int)
+    size=pixels.max(axis=0)+2
+    if np.prod(size)>100000:return None
+    mask=np.zeros(tuple(size[::-1]),np.uint8);mask[pixels[:,1],pixels[:,0]]=255
+    contours,hierarchy=cv2.findContours(mask,cv2.RETR_CCOMP,cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:return None
+    i=max(range(len(contours)),key=lambda j:cv2.contourArea(contours[j]))
+    # A closed ring is required: do not bridge an unobserved back face.
+    if hierarchy[0,i,2]<0:return None
+    outline=cv2.approxPolyDP(contours[i],1.,True)[:,0,:]
+    if not 3<=len(outline)<=24:return None
+    outline=(outline+.5)*cell+low
+    lines=[]
+    for a,b in zip(outline,np.roll(outline,-1,axis=0)):
+        direction=b-a;length=np.linalg.norm(direction)
+        if length<.08:return None
+        direction/=length;normal=np.array([-direction[1],direction[0]])
+        offset=(xz-a)@normal;along=(xz-a)@direction
+        use=(abs(offset)<cell*2)&(along>=-.02)&(along<=length+.02)&(abs(normals@normal)>.95)
+        if use.sum()<12 or len(np.unique(frames[use]))<2:return None
+        # Median source normal removes raster orientation bias. Align signs.
+        aligned=normals[use]*np.where((normals[use]@normal)>=0,1,-1)[:,None]
+        normal=np.median(aligned,axis=0);normal/=np.linalg.norm(normal)
+        votes=[np.median(xz[use&(frames==f)]@normal) for f in np.unique(frames[use])]
+        distance=float(np.median(votes))
+        if np.ptp(votes)>.025 or np.percentile(abs(xz[use]@normal-distance),90)>.025:return None
+        lines.append((normal,distance))
+    fitted=[]
+    for j,(normal,distance) in enumerate(lines):
+        previous,offset=lines[j-1];system=np.array([previous,normal])
+        if abs(np.linalg.det(system))<.15:return None
+        point=np.linalg.solve(system,[offset,distance])
+        if np.linalg.norm(point-outline[j])>.1:return None
+        fitted.append(point)
+    return np.asarray(fitted)
+
+
 def element(kind,profile,bottom,top,frames,capture_id=None,observed=(),inferred=()):
     profile=np.asarray(profile,float)
     center=profile.mean(axis=0)
@@ -83,17 +128,19 @@ def columns(points,normals,frames,walls=(),capture_id=None,cell=.06):
         rect=cv2.minAreaRect(xz);width,depth=rect[1]
         if min(width,depth)<.1 or max(width,depth)>1.8:continue
         profile=cv2.boxPoints(rect).astype(float)
+        measured=supported_polygon(xz,n[use][:,[0,2]],source_frames)
+        if measured is not None:profile=measured
         # Require observed evidence near every rectangular side to label a
         # rectangular column. Otherwise retain ambiguity, not fabricated faces.
         faces=[]
-        for i in range(4):
-            a,b=profile[i],profile[(i+1)%4];axis=b-a;axis/=np.linalg.norm(axis)
+        for i in range(len(profile)):
+            a,b=profile[i],profile[(i+1)%len(profile)];axis=b-a;axis/=np.linalg.norm(axis)
             distance=abs((xz-a)@np.array([-axis[1],axis[0]]))
             side=distance<.025
             if side.sum()>=12 and len(np.unique(source_frames[side]))>=2:faces.append(f'side-{i}')
-        kind='column' if len(faces)==4 else 'unknown-structural'
+        kind='column' if len(faces)==len(profile) else 'unknown-structural'
         value=element(kind,profile,bottom,top,source_frames,capture_id,faces,
-                      ['bottom','top']+[f'side-{i}' for i in range(4) if f'side-{i}' not in faces])
+                      ['bottom','top']+[f'side-{i}' for i in range(len(profile)) if f'side-{i}' not in faces])
         # Fit a circle only with broad angular evidence; a partial arc must not
         # invent an unseen radius. Compare residual against rectangular sides.
         xy=xz.astype(float);design=np.column_stack([2*xy,np.ones(len(xy))])

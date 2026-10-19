@@ -1,6 +1,6 @@
 import unittest
 import numpy as np
-from structural_candidates import columns,beams
+from structural_candidates import columns,beams,supported_polygon
 
 
 def samples(circle=False):
@@ -17,6 +17,20 @@ def samples(circle=False):
 
 
 class ColumnTests(unittest.TestCase):
+    def test_concave_profile_planes_retain_the_reentrant_corner(self):
+        outline=np.array([[0,0],[.6,0],[.6,.2],[.2,.2],[.2,.6],[0,.6]])
+        points=[];normals=[];frames=[]
+        for f in [1,4]:
+            for a,b in zip(outline,np.roll(outline,-1,axis=0)):
+                axis=b-a;axis/=np.linalg.norm(axis)
+                for t in np.arange(0,1,.01):
+                    points.append(a+t*(b-a));normals.append([-axis[1],axis[0]]);frames.append(f)
+        fitted=supported_polygon(points,normals,np.array(frames))
+        self.assertIsNotNone(fitted)
+        area=abs(np.sum(fitted[:,0]*np.roll(fitted[:,1],-1)-fitted[:,1]*np.roll(fitted[:,0],-1)))/2
+        self.assertAlmostEqual(area,.2,places=4)
+        self.assertEqual(len(fitted),6)
+
     def test_rectangular_and_circular_columns_preserve_shape(self):
         for circle in [False,True]:
             found=columns(*samples(circle))
