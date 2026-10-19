@@ -39,3 +39,9 @@ Validation: 48 Python tests pass, including global loop compromise, fixed anchor
 Added oriented surfels with equal contribution per source frame, retained frame membership, per-axis inter-frame variance and separate normal bins. Opposing faces are not averaged. No gaps are filled; final dimensions must use source points. Display cloud voxel grouping now uses exact coordinates and requires support from distinct frames instead of duplicate pixels.
 
 Validation: 51 Python tests pass. Full adaptive TSDF/mesh reconstruction and topology-qualified plane extraction remain deferred; this foundation supports candidate segmentation without implying complete observed surfaces.
+
+## Phase 7 — column candidate extraction
+
+Added independent-frame, multi-height cross-section persistence with wall-plane exclusion. Fully supported rectangular sides and broad circular arcs retain their different shapes; open profiles stay unknown-structural candidates with inferred faces. Source frame IDs and observed vertical extent are retained; no hidden extension to floor/ceiling is asserted.
+
+Validation: 54 Python tests pass, including rectangular/circular shapes, separate columns, short furniture and single-frame rejection. General concave/tapered profiles, attached-column recovery and tall-furniture discrimination remain incomplete. Real recall and dimensional accuracy have not been qualified.
