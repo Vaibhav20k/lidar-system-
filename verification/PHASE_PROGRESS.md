@@ -15,3 +15,9 @@ Both ceiling implementations now enumerate supported beam runs, split missing ob
 Ceiling-region holes no longer create false overhead clearances. Calibration scales fixture depth, invalidates tolerances and rejects oversized results instead of clamping them. Structural origins follow height-datum changes. GLB export enables ceiling geometry/items explicitly.
 
 Validation: 39 Python tests, 34 TypeScript/API tests and production build pass. Swift source updated for matching interval semantics; native compilation/device validation remains pending macOS/Xcode. Geometry-fitting/recall improvements on real captures have not been established.
+
+## Phase 3 — bounded capture selection and coverage foundation
+
+Implemented a bounded 360-primary/120-reserve viewpoint policy. Redundant camera cells stop consuming slots after three observations; new views and revisits can use the reserve. Frame-write failures and policy version are recorded. The offline patch-coverage utility distinguishes repeated frames from spatially/angularly distinct views and never claims unseen space is covered.
+
+Validation: 42 Python tests pass, including redundant-view, reserved-revisit and distinct-view coverage cases. Swift source mirrors the replay policy; native compilation, frame-rate/thermal trials and live per-face guidance still require completion/device validation. This is the capture-selection foundation, not a completed active surface-guidance system.

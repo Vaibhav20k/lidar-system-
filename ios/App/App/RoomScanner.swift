@@ -763,9 +763,29 @@ private func pixelBytes(_ buffer: CVPixelBuffer) -> Data {
 /// Saves posed RGB + LiDAR depth keyframes from the ARSession RoomPlan is driving, so a scan can be
 /// re-processed later (texturing, vision models) without asking the user to scan again.
 /// Polls `currentFrame` instead of becoming the ARSession delegate, which RoomPlan owns.
+// Bounded viewpoint budget; mirrored by coverage.py for replay testing.
+// Camera-view diversity is not a claim of complete surface coverage.
+private struct CaptureSamplingPolicy {
+    let primary = 360, maximum = 480
+    private(set) var count = 0
+    private var views: [String: (count: Int, last: TimeInterval)] = [:]
+    mutating func select(_ pose: simd_float4x4, time: TimeInterval) -> Bool {
+        guard count < maximum else { return false }
+        let p = pose.columns.3, f = -pose.columns.2
+        let key = [p.x / 0.3, p.y / 0.3, p.z / 0.3, f.x / 0.25, f.y / 0.25, f.z / 0.25].map { String(Int(floor($0))) }.joined(separator: ":")
+        let prior = views[key] ?? (count: 0, last: -Double.infinity)
+        let revisit = prior.count > 0 && time - prior.last >= 20
+        guard prior.count < 3 || revisit else { return false }
+        guard count < primary || prior.count == 0 || revisit else { return false }
+        views[key] = (prior.count + 1, time); count += 1
+        return true
+    }
+}
+
 @available(iOS 16.0, *)
 private final class RawCaptureRecorder {
-    static let maxFrames = 360
+    static let maxFrames = 480
+    private var sampling = CaptureSamplingPolicy()
     private let folder: URL
     private weak var session: ARSession?
     private let queue = DispatchQueue(label: "roomform.raw-capture", qos: .utility)
@@ -776,11 +796,10 @@ private final class RawCaptureRecorder {
     private var lastTelemetry = -Double.infinity, lastSavedTime = -Double.infinity
     private var previousSample: (pose: simd_float4x4, time: TimeInterval)?
     private var limitedMappingSamples = 0, sampledFrames = 0
-    private var burstRemaining = 0, telemetryCount = 0
+    private var telemetryCount = 0
     private var timer: Timer?
     // Main thread only.
     private var busy = false, attempts = 0
-    private var lastPose: simd_float4x4?
     // `queue` only.
     private var saved = 0, depthSaved = 0, depthSize: [Int] = []
 
@@ -849,13 +868,7 @@ private final class RawCaptureRecorder {
             onGuidance?("Cover floor and ceiling; revisit the same starting corner at the same angle. Glass needs independent measurement.")
         }
         guard !busy, frame.timestamp - lastSavedTime >= 0.35 else { return }
-        if let last = lastPose {
-            let moved = simd_distance(last.columns.3, pose.columns.3) > 0.15
-            let turned = simd_dot(simd_make_float3(last.columns.2), simd_make_float3(pose.columns.2)) < 0.9903
-            if moved || turned { burstRemaining = 2; lastPose = pose }
-            else if burstRemaining > 0 { burstRemaining -= 1 }
-            else { return }
-        } else { lastPose = pose; burstRemaining = 2 }
+        guard sampling.select(pose, time: frame.timestamp) else { return }
         lastSavedTime = frame.timestamp; busy = true; attempts += 1
         let number = attempts
         // Holds one ARFrame at a time; `busy` stops a backlog that would starve ARKit of buffers.
@@ -929,7 +942,7 @@ private final class RawCaptureRecorder {
         queue.sync { counts = (saved, depthSaved, depthSize); try? index.close(); try? trackingIndex.close() }
         guard counts.frames > 0 else { discard(); return nil }
         let manifest: [String: Any] = [
-            "version": 1, "scanId": scanId, "createdAt": ISO8601DateFormatter().string(from: Date()),
+            "version": 1, "recordingPolicyVersion": 2, "scanId": scanId, "createdAt": ISO8601DateFormatter().string(from: Date()),
             "device": UIDevice.current.model, "system": UIDevice.current.systemVersion,
             "frames": counts.frames, "depthFrames": counts.depth, "depthSize": counts.size,
             "image": "frames/<frame>.jpg, sensor-native landscape orientation; intrinsics apply to this unrotated image",
@@ -937,7 +950,9 @@ private final class RawCaptureRecorder {
             "confidenceFormat": "confidence/<frame>.bin, uint8 per pixel: 0 low, 1 medium, 2 high",
             "index": "frames.jsonl, one JSON object per saved frame",
             "trackingIndex": "tracking.jsonl, tracking state and gaps every 0.5 seconds including limited tracking",
-            "sampling": "15 cm or 8 degrees, with two additional repeat frames at >=0.35 second intervals",
+            "sampling": "viewpoint-budget-v2: 360 primary + 120 new-view/revisit slots; maximum 3 redundant views per 30 cm/heading cell before a 20 second revisit",
+            "coverageComplete": false,
+            "attemptedFrames": attempts, "failedFrameWrites": attempts - counts.frames,
             "recordingLimitReached": attempts >= Self.maxFrames,
             "mappingSamples": sampledFrames, "limitedMappingSamples": limitedMappingSamples,
             "featuresFormat": "features/<frame>.json, ARKit feature ids and world positions at capture time; not ground truth",
