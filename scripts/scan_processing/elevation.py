@@ -12,6 +12,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from observations import frame_observations, unproject, camera_normals
 
 OCCLUSION_TOLERANCE = 0.12  # meters in front of the wall plane before a pixel counts as blocked
 MIN_COS_INCIDENCE = 0.25    # ignore views more oblique than ~75 degrees
@@ -415,36 +416,14 @@ def depth_points(raw: Path, max_range=4.5, with_frames=False, min_confidence=1):
     """Every confident LiDAR depth sample of a scan as world-space points with surface normals facing the camera.
 
     With `with_frames`, also returns each point's frame number in capture order."""
-    manifest = json.loads((raw / 'manifest.json').read_text())
-    dw, dh = manifest['depthSize']
-    u, v = np.meshgrid(np.arange(dw) + 0.5, np.arange(dh) + 0.5)
-    points, normals, order = [], [], []
-    for line in (raw / 'frames.jsonl').read_text().splitlines():
-        if not line.strip():
-            continue
-        f = json.loads(line)
-        depth_file = raw / 'depth' / f"{f['frame']}.bin"
-        if not f.get('depth') or not depth_file.exists():
-            continue
-        depth = np.fromfile(depth_file, dtype='<f4').reshape(dh, dw)
-        confidence = np.fromfile(raw / 'confidence' / f"{f['frame']}.bin", dtype=np.uint8).reshape(dh, dw)
-        k = np.array(f['intrinsics'], dtype=np.float64).reshape(3, 3).T
-        scale = dw / f['imageWidth']
-        camera = np.stack([(u - k[0, 2] * scale) / (k[0, 0] * scale) * depth, -(v - k[1, 2] * scale) / (k[1, 1] * scale) * depth, -depth], axis=-1)
-        normal = np.cross(np.gradient(camera, axis=1), np.gradient(camera, axis=0))
-        normal /= np.maximum(np.linalg.norm(normal, axis=-1, keepdims=True), 1e-9)
-        normal[np.sum(normal * camera, axis=-1) > 0] *= -1
-        pose = matrix(f['cameraToWorld'])
-        keep = (confidence >= min_confidence) & np.isfinite(depth) & (depth > 0.3) & (depth < max_range)
-        points.append((camera @ pose[:3, :3].T + pose[:3, 3])[keep])
-        normals.append((normal @ pose[:3, :3].T)[keep])
-        order.append(np.full(int(keep.sum()), len(order), np.int32))
-    if not points:
-        empty = np.empty((0, 3))
-        return (empty, empty.copy(), np.empty(0, dtype=np.int32)) if with_frames else (empty, empty.copy())
-    if with_frames:
-        return np.concatenate(points), np.concatenate(normals), np.concatenate(order)
-    return np.concatenate(points), np.concatenate(normals)
+    points, normals, ids = [], [], []
+    for frame in frame_observations(raw, min_confidence, max_range):
+        points.append(frame['points']); normals.append(frame['normals'])
+        ids.append(np.full(len(frame['points']),frame['frameId'],np.int32))
+    p = np.concatenate(points) if points else np.empty((0,3))
+    n = np.concatenate(normals) if normals else np.empty((0,3))
+    f = np.concatenate(ids) if ids else np.empty(0,np.int32)
+    return (p,n,f) if with_frames else (p,n)
 
 
 def ceiling_surfaces(capture, room, min_area=0.4):

@@ -16,6 +16,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from beam_runs import supported_runs
+from observations import frame_observations
 
 import uuid
 
@@ -37,36 +38,16 @@ FACE_MIN = 3.0        # pooled points per fine cell needed to call it a face
 
 def ceiling_points(capture, raw: Path, floor_y):
     """World-space points above head height: on downward-facing surfaces, and on vertical faces (beam sides)."""
-    manifest = json.loads((raw / 'manifest.json').read_text())
-    dw, dh = manifest['depthSize']
-    u, v = np.meshgrid(np.arange(dw) + 0.5, np.arange(dh) + 0.5)
-    chunks, sides, frame_ids = [], [], []
-    for frame_id, line in enumerate((raw / 'frames.jsonl').read_text().splitlines()):
-        if not line.strip():
-            continue
-        f = json.loads(line)
-        depth_file = raw / 'depth' / f"{f['frame']}.bin"
-        if not f.get('depth') or not depth_file.exists():
-            continue
-        depth = np.fromfile(depth_file, dtype='<f4').reshape(dh, dw)
-        confidence = np.fromfile(raw / 'confidence' / f"{f['frame']}.bin", dtype=np.uint8).reshape(dh, dw)
-        k = np.array(f['intrinsics'], dtype=np.float64).reshape(3, 3).T
-        scale = dw / f['imageWidth']
-        camera = np.stack([(u - k[0, 2] * scale) / (k[0, 0] * scale) * depth, -(v - k[1, 2] * scale) / (k[1, 1] * scale) * depth, -depth], axis=-1)
-        normal = np.cross(np.gradient(camera, axis=1), np.gradient(camera, axis=0))
-        normal /= np.maximum(np.linalg.norm(normal, axis=-1, keepdims=True), 1e-9)
-        normal[np.sum(normal * camera, axis=-1) > 0] *= -1  # face the camera
-        pose = matrix(f['cameraToWorld'])
-        world = camera @ pose[:3, :3].T + pose[:3, 3]
-        world_normal_y = normal @ pose[1, :3]
-        usable = (depth > 0.3) & (depth < 5) & (world[..., 1] - floor_y > MIN_HEIGHT)
-        selected = usable & (confidence >= 1) & (world_normal_y < FACING_DOWN)
-        chunks.append(world[selected])
-        frame_ids.append(np.full(int(selected.sum()), frame_id, np.int32))
-        sides.append(world[usable & (confidence >= 2) & (np.abs(world_normal_y) < FACING_SIDE)])
-    empty = np.zeros((0, 3))
-    return ((np.concatenate(chunks) if chunks else empty), (np.concatenate(sides) if sides else empty),
-            np.concatenate(frame_ids) if frame_ids else np.empty(0, np.int32))
+    chunks, sides, ids = [], [], []
+    for f in frame_observations(raw, min_confidence=2, max_range=5):
+        p,n = f['points'],f['normals']
+        above=p[:,1]-floor_y>MIN_HEIGHT
+        down=above & (n[:,1]<FACING_DOWN)
+        chunks.append(p[down]); ids.append(np.full(int(down.sum()),f['frameId'],np.int32))
+        sides.append(p[above & (np.abs(n[:,1])<FACING_SIDE)])
+    empty=np.empty((0,3))
+    return (np.concatenate(chunks) if chunks else empty, np.concatenate(sides) if sides else empty,
+            np.concatenate(ids) if ids else np.empty(0,np.int32))
 
 
 def balanced_cell_heights(cells, heights, frames, size):

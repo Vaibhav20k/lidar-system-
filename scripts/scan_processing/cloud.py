@@ -20,6 +20,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from observations import unproject, camera_normals
 
 from elevation import Wall, matrix
 
@@ -55,10 +56,8 @@ def main():
         image = cv2.imread(str(image_file))
         k = np.array(f['intrinsics'], dtype=np.float64).reshape(3, 3).T
         scale = dw / f['imageWidth']
-        camera = np.stack([(u - k[0, 2] * scale) / (k[0, 0] * scale) * depth, -(v - k[1, 2] * scale) / (k[1, 1] * scale) * depth, -depth], axis=-1)
-        normal = np.cross(np.gradient(camera, axis=1), np.gradient(camera, axis=0))
-        normal /= np.maximum(np.linalg.norm(normal, axis=-1, keepdims=True), 1e-9)
-        normal[np.sum(normal * camera, axis=-1) > 0] *= -1
+        camera = unproject(depth, f)
+        normal = camera_normals(camera)
         # Only high-confidence readings: medium ones smear edges and add floating specks.
         keep = (confidence >= 2) & (depth > 0.3) & (depth < MAX_RANGE)
         pose = matrix(f['cameraToWorld'])
@@ -66,7 +65,7 @@ def main():
         facing_down = (normal[keep] @ pose[:3, :3].T)[:, 1] < -0.8
         # Colour from the photo pixel the depth pixel sits on (the photo is the depth map's 7.5x enlargement).
         h, w = image.shape[:2]
-        px = np.clip((u[keep] / scale).astype(int), 0, w - 1); py = np.clip((v[keep] / scale).astype(int), 0, h - 1)
+        px = np.clip((u[keep] / scale).astype(int), 0, w - 1); py = np.clip((v[keep] / (dh / f['imageHeight'])).astype(int), 0, h - 1)
         colour = image[py, px][:, ::-1]  # BGR to RGB
         world[:, 1] -= floor_y
         inside = np.all((world >= low) & (world <= high), axis=1)

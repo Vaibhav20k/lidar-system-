@@ -21,3 +21,9 @@ Validation: 39 Python tests, 34 TypeScript/API tests and production build pass. 
 Implemented a bounded 360-primary/120-reserve viewpoint policy. Redundant camera cells stop consuming slots after three observations; new views and revisits can use the reserve. Frame-write failures and policy version are recorded. The offline patch-coverage utility distinguishes repeated frames from spatially/angularly distinct views and never claims unseen space is covered.
 
 Validation: 42 Python tests pass, including redundant-view, reserved-revisit and distinct-view coverage cases. Swift source mirrors the replay policy; native compilation, frame-rate/thermal trials and live per-face guidance still require completion/device validation. This is the capture-selection foundation, not a completed active surface-guidance system.
+
+## Phase 4 — canonical observation geometry
+
+Depth, ceiling and cloud consumers share pixel-center unprojection with independent horizontal/vertical intrinsic scaling. Camera poses must be rigid and source-frame indices survive missing depth records. Normals across large depth discontinuities and low-confidence samples are excluded from measurement observations. Original depth is retained; no learned sensor correction is applied.
+
+Validation: 46 Python tests pass, including nonuniform-resize reprojection, rigid-pose rejection, missing-frame identity and confidence exclusion. Device calibration, range/incidence bias fitting and physical accuracy remain pending data from the other system.
