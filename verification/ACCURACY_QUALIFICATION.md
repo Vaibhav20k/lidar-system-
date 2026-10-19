@@ -6,6 +6,8 @@ This delivery is an executable structural reconstruction foundation, not a quali
 
 Raw scan bundles and independent dimensions are on the user's other system. Do not upload them to GitHub. Place private data outside the repository when transferring it to the processing machine.
 
+Remote verification: [run 39220783051](https://github.com/Vaibhav20k/lidar-system-/actions/runs/39220783051) passed geometry, web, Android debug build and unsigned iOS build at code commit `c692478c38712adbc2b2db2aea2b14f29276e304`. This supersedes earlier notes about native source being uncompiled. Signing, installation and physical-device behavior are still untested for these changes.
+
 ## Run the software checks
 
 Use Node 24 and Python with NumPy and OpenCV (the current tested environment uses Python 3.14, NumPy 2.5.4 and opencv-python-headless 5.0.0.93).
@@ -47,14 +49,14 @@ Score misses, false positives and class confusions separately. Report error per 
 
 | Area | Remaining work before claiming the original plan complete |
 | --- | --- |
-| Capture | Build/run Swift changes; measure frame loss, thermal behavior and storage; complete live per-face guidance. |
+| Capture | Run the compiled Swift changes on a device; measure frame loss, thermal behavior and storage; complete live per-face guidance. |
 | Calibration | Verify actual RGB/depth alignment and characterize range/incidence/device bias on independent targets. |
 | Registration | Real loop/revisit tests, large-room runtime and rejection behavior; full photometric bundle adjustment is not implemented. |
 | Surfaces | Oriented surfels are available; adaptive TSDF, mesh fallback, full plane topology and source-weighted uncertainty are incomplete. |
 | Columns | Closed concave outlines have source-plane refitting; wall-attached open profiles, taper/section changes and tall-furniture ambiguity need further work and data. |
 | Beams | Horizontal underside proposals work; sloped beams, measured side/top intersections, holes and beam-column junction reconstruction remain incomplete. |
 | Review | Full profile-vertex editing, elevation overlays and inference-aware snapping remain incomplete. |
-| Release | Real holdout, instrument error budget, native builds/device scans and performance limits must pass. |
+| Release | Real holdout, instrument error budget, signed device scans and performance limits must pass. Unsigned native CI compilation has passed. |
 
 These gaps must not be hidden by labeling candidates confirmed. Confirmation records human review only.
 

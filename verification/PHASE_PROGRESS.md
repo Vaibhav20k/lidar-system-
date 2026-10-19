@@ -1,5 +1,11 @@
 # Implementation progress
 
+## Latest verified checkpoint
+
+Code commit `c692478c38712adbc2b2db2aea2b14f29276e304` is pushed to delivery `main`. [GitHub run 39220783051](https://github.com/Vaibhav20k/lidar-system-/actions/runs/39220783051) passed all four jobs: geometry, web, Android and unsigned iOS. Local checks: 61 Python tests, 38 TypeScript/API tests, three Chrome end-to-end tests and production build. Native compilation is now confirmed, superseding historical phase notes below; signed device and physical accuracy qualification remain pending.
+
+This is a partial implementation of the full research plan, with usable candidate detection/review/export and explicit remaining engineering gates. It is not a completed zero-miss or 20 mm accuracy release. See [qualification and remaining work](ACCURACY_QUALIFICATION.md).
+
 ## Phase 1 — versioned structural model
 
 Implemented room schema v2 with non-mutating v1 migration and explicit structural elements. Canonical geometry supports polygon extrusion, circular columns and corresponding polygon sections. Elements preserve capture identity, observed/inferred face labels, processing version, source-frame IDs, connections and unverified dimensional quality. Unit quaternions and simple profiles are validated. Unsupported experimental `structure.py` output is rejected explicitly instead of silently disappearing.

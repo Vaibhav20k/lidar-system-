@@ -4,7 +4,7 @@ A room capture and review app for **iPhone and Android**, with a desktop browser
 
 ## Current delivery
 
-The structural-accuracy implementation now includes schema v2, canonical beam/column candidates, review/export and guarded offline processing. See [phase status](verification/PHASE_PROGRESS.md) and [qualification procedure](verification/ACCURACY_QUALIFICATION.md) for implemented scope, known gaps and reproducible checks. These changes have **not** been qualified on independently measured phone captures; the updated Swift source still needs a fresh Xcode/device build.
+The structural-accuracy implementation now includes schema v2, canonical beam/column candidates, review/export and guarded offline processing. See [phase status](verification/PHASE_PROGRESS.md) and [qualification procedure](verification/ACCURACY_QUALIFICATION.md) for implemented scope, known gaps and reproducible checks. Web, Python, Android and unsigned iOS CI checks pass. These changes have **not** been qualified on independently measured phone captures; signed device testing remains pending.
 
 - Editable 3D room and dimensioned floorplan; manual room creation and JSON import.
 - Wall heights/thicknesses, floor corners, doors/windows, furniture volumes, undo and reference scale calibration.
