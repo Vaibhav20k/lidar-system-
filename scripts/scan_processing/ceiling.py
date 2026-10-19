@@ -15,6 +15,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from beam_runs import supported_runs
 
 import uuid
 
@@ -245,58 +246,43 @@ def wall_beams(capture, raw, floor_y, ceiling_height, room_walls):
             if filled < FACE_FILL or front - wall_at < BEAM_MIN_DEPTH or ceiling_height - bottom > BEAM_MAX_DROP:
                 found.append(big_beam(stretch, wall_at, s0)); continue
             found.append((bottom, wall_at, front))
-        # The longest run of beam stretches, bridging single gaps (a lamp or a cable in front of the face).
-        best, run, gap = (0, 0), None, 0
-        for i, f in enumerate(found + [None, None]):
-            if f is not None:
-                run, gap = (run if run is not None else i), 0
-                if i - run + 1 > best[1] - best[0]:
-                    best = (run, i + 1)
-            elif run is not None:
-                gap += 1
-                if gap > 1:
-                    run, gap = None, 0
-        hits = [f for f in found[best[0]:best[1]] if f is not None]
-        length = (best[1] - best[0]) * BEAM_STRETCH
-        if len(hits) < 4 or length < max(BEAM_MIN_LENGTH, 0.5 * wall.width):
-            continue
-        bottom, wall_at, front = (float(np.median([f[k] for f in hits])) for k in range(3))
-        # One beam has one bottom and one face. Most stretches must agree on both; a few may not, where something stands
-        # in front of the face (boxes on a wardrobe, a curtain) - the typical value is the beam.
-        # The bottom must be one height; the depth may change gradually (a beam face not quite parallel to a bowed
-        # wall), so it must follow a straight line along the wall rather than be one number.
-        centres = np.array([-wall.width / 2 + (i + 0.5) * BEAM_STRETCH for i in range(best[0], best[1]) if found[i] is not None])
-        bottoms, depths = np.array([f[0] for f in hits]), np.array([f[2] - f[1] for f in hits])
-        trend = np.polyfit(centres, depths, 1) if len(hits) >= 3 else np.array([0.0, float(np.median(depths))])
-        # Heights come in 1 cm steps, so the bottom gets 4 cm: a tighter limit flips on a millimetre of rounding.
-        # A big beam's face is far from the wall, so a few cm of scan drift weigh on it more: 4 cm there.
-        agree = (np.abs(bottoms - np.median(bottoms)) <= 0.04) & (np.abs(depths - np.polyval(trend, centres)) <= (0.04 if np.median(depths) >= BIG_MIN_DEPTH else 0.03))
-        if agree.mean() < 0.6:
-            continue
-        bottom, wall_at, front = (float(np.median([f[k] for f, ok in zip(hits, agree) if ok])) for k in range(3))
-        fronts = np.array([f[2] for f in hits])
-        front_line = np.polyfit(centres[agree], fronts[agree], 1) if agree.sum() >= 3 else np.array([0.0, front])
-        # A beam is solid from its bottom to the ceiling, so the ceiling is never seen behind its face. Behind a pipe,
-        # a light track or a curtain rail it is (in the scans so far: at most 0.24x the beam's bottom for beams, 30x for a pipe).
-        margin = max(0.01, 0.25 * (front - wall_at))  # a fixed 2 cm would leave nothing to look at behind a 4-6 cm beam
-        strip = near & down & (along >= -wall.width / 2 + best[0] * BEAM_STRETCH) & (along < -wall.width / 2 + best[1] * BEAM_STRETCH) & (out > wall_at + margin) & (out < front - margin)
-        seen_ceiling, seen_bottom = (strip & (np.abs(height - ceiling_height) < 0.04)).sum(), (strip & (np.abs(height - bottom) < 0.03)).sum()
-        if seen_bottom < 30 or seen_ceiling > 0.5 * seen_bottom:
-            continue
-        u0, u1 = -wall.width / 2 + best[0] * BEAM_STRETCH, min(wall.width / 2, -wall.width / 2 + best[1] * BEAM_STRETCH)
-        # A beam that reaches near a corner runs into it; the last stretch is usually hidden by the other wall.
-        if u0 + wall.width / 2 < 0.5:
-            u0 = -wall.width / 2
-        if wall.width / 2 - u1 < 0.5:
-            u1 = wall.width / 2
-        inner = min(0.0, wall_at) - 0.01
-        f0, f1 = (float(np.polyval(front_line, u)) for u in (u0, u1))
-        corners = [wall.origin + wall.axis_x * u + wall.inward * o for u, o in ((u0, inner), (u1, inner), (u1, f1), (u0, f0))]
-        regions.append({'points': [{'x': round(float(c[0]), 3), 'z': round(float(c[2]), 3)} for c in corners], 'height': round(bottom, 3), 'evidence': 'measured'})
-        d0, d1 = sorted(float(np.polyval(trend, u)) * 100 for u in (u0, u1))
-        out_text = f'{(front - wall_at) * 100:.0f} cm' if d1 - d0 < 2 else f'{d0:.0f}-{d1:.0f} cm'
-        kind = 'lowered ceiling (bulkhead)' if front - wall_at >= BULKHEAD_DEPTH else 'beam'
-        notes.append(f"{kind} along a {wall.width:.2f} m wall: {out_text} out from the wall, {(ceiling_height - bottom) * 100:.0f} cm below the ceiling, {u1 - u0:.2f} m long")
+        for best in supported_runs(found):
+            hits = [f for f in found[best[0]:best[1]] if f is not None]
+            length = (best[1] - best[0]) * BEAM_STRETCH
+            if len(hits) < 4 or length < 1.0:
+                continue
+            bottom, wall_at, front = (float(np.median([f[k] for f in hits])) for k in range(3))
+            # One beam has one bottom and one face. Most stretches must agree on both; a few may not, where something stands
+            # in front of the face (boxes on a wardrobe, a curtain) - the typical value is the beam.
+            # The bottom must be one height; the depth may change gradually (a beam face not quite parallel to a bowed
+            # wall), so it must follow a straight line along the wall rather than be one number.
+            centres = np.array([-wall.width / 2 + (i + 0.5) * BEAM_STRETCH for i in range(best[0], best[1]) if found[i] is not None])
+            bottoms, depths = np.array([f[0] for f in hits]), np.array([f[2] - f[1] for f in hits])
+            trend = np.polyfit(centres, depths, 1) if len(hits) >= 3 else np.array([0.0, float(np.median(depths))])
+            # Heights come in 1 cm steps, so the bottom gets 4 cm: a tighter limit flips on a millimetre of rounding.
+            # A big beam's face is far from the wall, so a few cm of scan drift weigh on it more: 4 cm there.
+            agree = (np.abs(bottoms - np.median(bottoms)) <= 0.04) & (np.abs(depths - np.polyval(trend, centres)) <= (0.04 if np.median(depths) >= BIG_MIN_DEPTH else 0.03))
+            if agree.mean() < 0.6:
+                continue
+            bottom, wall_at, front = (float(np.median([f[k] for f, ok in zip(hits, agree) if ok])) for k in range(3))
+            fronts = np.array([f[2] for f in hits])
+            front_line = np.polyfit(centres[agree], fronts[agree], 1) if agree.sum() >= 3 else np.array([0.0, front])
+            # A beam is solid from its bottom to the ceiling, so the ceiling is never seen behind its face. Behind a pipe,
+            # a light track or a curtain rail it is (in the scans so far: at most 0.24x the beam's bottom for beams, 30x for a pipe).
+            margin = max(0.01, 0.25 * (front - wall_at))  # a fixed 2 cm would leave nothing to look at behind a 4-6 cm beam
+            strip = near & down & (along >= -wall.width / 2 + best[0] * BEAM_STRETCH) & (along < -wall.width / 2 + best[1] * BEAM_STRETCH) & (out > wall_at + margin) & (out < front - margin)
+            seen_ceiling, seen_bottom = (strip & (np.abs(height - ceiling_height) < 0.04)).sum(), (strip & (np.abs(height - bottom) < 0.03)).sum()
+            if seen_bottom < 30 or seen_ceiling > 0.5 * seen_bottom:
+                continue
+            u0, u1 = -wall.width / 2 + best[0] * BEAM_STRETCH, min(wall.width / 2, -wall.width / 2 + best[1] * BEAM_STRETCH)
+            inner = min(0.0, wall_at) - 0.01
+            f0, f1 = (float(np.polyval(front_line, u)) for u in (u0, u1))
+            corners = [wall.origin + wall.axis_x * u + wall.inward * o for u, o in ((u0, inner), (u1, inner), (u1, f1), (u0, f0))]
+            regions.append({'points': [{'x': round(float(c[0]), 3), 'z': round(float(c[2]), 3)} for c in corners], 'height': round(bottom, 3), 'evidence': 'measured'})
+            d0, d1 = sorted(float(np.polyval(trend, u)) * 100 for u in (u0, u1))
+            out_text = f'{(front - wall_at) * 100:.0f} cm' if d1 - d0 < 2 else f'{d0:.0f}-{d1:.0f} cm'
+            kind = 'lowered ceiling (bulkhead)' if front - wall_at >= BULKHEAD_DEPTH else 'beam'
+            notes.append(f"{kind} along a {wall.width:.2f} m wall: {out_text} out from the wall, {(ceiling_height - bottom) * 100:.0f} cm below the ceiling, {u1 - u0:.2f} m long")
     return regions, notes
 
 

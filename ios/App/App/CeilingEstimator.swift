@@ -19,6 +19,27 @@ final class CeilingWorkBudget {
 }
 
 struct CeilingEstimator {
+
+    // Same interval semantics as beam_runs.py: missing samples and changing
+    // sections split runs. Unsupported corner continuations are not invented.
+    static func supportedRuns(_ found: [(bottom: Float, wall: Float, front: Float)?]) -> [(Int, Int)] {
+        var result: [(Int, Int)] = [], start: Int?
+        for i in 0...found.count {
+            let current = i < found.count ? found[i] : nil
+            let previous = i > 0 ? found[i - 1] : nil
+            var split = current == nil
+            if let a = current, let b = previous {
+                split = abs(a.bottom - b.bottom) > 0.08 || abs((a.front - a.wall) - (b.front - b.wall)) > 0.08
+            }
+            if split, let first = start {
+                if i - first >= 4 { result.append((first, i)) }
+                start = nil
+            }
+            if current != nil && start == nil { start = i }
+        }
+        return result
+    }
+
     struct WallSurface { let id: String; let transform: simd_float4x4; let width: Float; let height: Float }
     /// A door, window or opening: only its top matters here (a beam bottom level with it is the opening's head).
     struct Opening { let transform: simd_float4x4; let width: Float; let height: Float }
@@ -737,21 +758,10 @@ struct CeilingEstimator {
                 if filled < Self.faceFill || front - wallAt < Self.beamMinDepth || ceiling - bottom > Self.beamMaxDrop { found.append(bigBeam(idx, wallAt: wallAt, s0: s0)); continue }
                 found.append((bottom, wallAt, front))
             }
-            // The longest run of beam stretches, bridging single gaps.
-            var best = (0, 0), run: Int?, gap = 0
-            for (i, f) in (found + [nil, nil]).enumerated() {
-                if f != nil {
-                    if run == nil { run = i }
-                    gap = 0
-                    if i - run! + 1 > best.1 - best.0 { best = (run!, i + 1) }
-                } else if run != nil {
-                    gap += 1
-                    if gap > 1 { run = nil; gap = 0 }
-                }
-            }
+            for best in Self.supportedRuns(found) {
             let hitIndices = (best.0..<best.1).filter { found[$0] != nil }
             let length = Float(best.1 - best.0) * Self.beamStretch
-            guard hitIndices.count >= 4, length >= max(Self.beamMinLength, 0.5 * wall.width) else { continue }
+            guard hitIndices.count >= 4, length >= 1.0 else { continue }
             let hits = hitIndices.map { found[$0]! }
             let centres = hitIndices.map { -wall.width / 2 + (Float($0) + 0.5) * Self.beamStretch }
             let bottoms = hits.map { $0.bottom }, depths = hits.map { $0.front - $0.wall }
@@ -774,14 +784,13 @@ struct CeilingEstimator {
             }
             guard seenBottom >= 30, Float(seenCeiling) <= 0.5 * Float(seenBottom) else { continue }
             var u0 = runStart, u1 = min(wall.width / 2, runEnd)
-            if u0 + wall.width / 2 < 0.5 { u0 = -wall.width / 2 }
-            if wall.width / 2 - u1 < 0.5 { u1 = wall.width / 2 }
             let inner = min(0, wallAt) - 0.01
             let corners = [(u0, inner), (u1, inner), (u1, frontLine.slope * u1 + frontLine.offset), (u0, frontLine.slope * u0 + frontLine.offset)].map { u, o -> SIMD2<Float> in
                 let p = origin + axis * u + inward * o
                 return SIMD2(p.x, p.z)
             }
             beams.append(Beam(polygon: corners, height: bottom))
+            }
         }
         return beams
     }

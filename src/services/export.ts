@@ -22,7 +22,7 @@ export async function exportPointsCsv(room: Room) {
   await deliverFile(new Blob(['\ufeff' + pointsCsv(room)], { type: 'text/csv' }), `${filename(room)}-points.csv`);
 }
 export async function exportGlb(room: Room) {
-  const group = buildRoomGroup(room);
+  const group = buildRoomGroup(room, { ceiling: true });
   try { const glb = await new GLTFExporter().parseAsync(group, { binary: true }); if (!(glb instanceof ArrayBuffer)) throw new Error('Invalid GLB export.'); await deliverFile(new Blob([glb], { type: 'model/gltf-binary' }), `${filename(room)}.glb`); }
   finally { disposeGroup(group); }
 }

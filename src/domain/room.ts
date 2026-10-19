@@ -93,7 +93,7 @@ function beamOver(room: Room, wall: Wall, along: number): number | undefined {
   if (!ceiling) return undefined;
   const length = wallLength(wall), dx = (wall.end.x - wall.start.x) / length, dz = (wall.end.z - wall.start.z) / length, out = 0.03 * wallInside(room, wall);
   const p = { x: wall.start.x + dx * along - dz * out, z: wall.start.z + dz * along + dx * out };
-  const heights = ceiling.regions.filter(r => r.height <= ceiling.height - BEAM_DROP && covers(r.points, p)).map(r => r.height);
+  const heights = ceiling.regions.filter(r => r.height <= ceiling.height - BEAM_DROP && covers(r.points, p) && !(r.holes ?? []).some(h => covers(h, p))).map(r => r.height);
   return heights.length ? Math.min(...heights) : undefined;
 }
 /** Beams running along a wall, as stretches of it (metres from the wall's start) with their underside height. */
@@ -304,6 +304,7 @@ export function setRoomHeight(room: Room, measuredHeight: number): Room {
   if (Math.abs(up) > 0.5) throw new Error(`That is ${Math.abs(up).toFixed(2)} m from the scanned height; measure to the main ceiling, not a beam or a lower part.`);
   const note = `Heights set from a tape-measured room height of ${measuredHeight.toFixed(3)} m (floor moved ${up >= 0 ? 'up' : 'down'} ${Math.abs(up * 100).toFixed(1)} cm).`;
   return parseRoom({ ...room, updatedAt: new Date().toISOString(),
+    structures: room.structures?.map(e => ({...e,origin:{...e.origin,y:e.origin.y-up},evidence:'edited' as const,quality:{absoluteAccuracyVerified:false as const,status:'edited' as const}})),
     walls: room.walls.map(w => ({ ...w, height: w.height - up, evidence: 'edited' as const })),
     openings: room.openings.map(o => { const sill = Math.max(0, o.sill - up); return { ...o, sill, height: o.sill + o.height - up - sill, evidence: 'edited' as const }; }),
     ceiling: { ...room.ceiling, height: measuredHeight, regions: room.ceiling.regions.map(d => ({ ...d, height: d.height - up })),
@@ -325,8 +326,8 @@ export function calibrateRoom(room: Room, measuredLength: number, wallId: string
     walls: room.walls.map(w => ({ ...w, start: p(w.start), end: p(w.end), height: w.height * s, baseY: w.baseY * s, thickness: w.thickness * s, evidence: 'edited' })),
     openings: room.openings.map(o => ({ ...o, offset: o.offset * s, width: o.width * s, height: o.height * s, sill: o.sill * s, evidence: 'edited' })),
     ...(room.ceiling ? { ceiling: { ...room.ceiling, height: room.ceiling.height * s, regions: room.ceiling.regions.map(d => ({ ...d, height: d.height * s, points: d.points.map(p), holes: d.holes?.map(h => h.map(p)), evidence: 'edited' as const })),
-      items: room.ceiling.items?.map(i => ({ ...i, ...p(i), height: i.height * s, width: Math.min(3, i.width * s), depth: Math.min(3, i.depth * s), evidence: 'edited' as const })) } } : {}),
-    ...(room.fixtures ? { fixtures: room.fixtures.map(f => ({ ...f, offset: f.offset * s, sill: f.sill * s, width: Math.min(2, f.width * s), height: Math.min(1, f.height * s), evidence: 'edited' as const })) } : {}),
+      items: room.ceiling.items?.map(i => ({ ...i, ...p(i), height: i.height * s, width: i.width * s, depth: i.depth * s, evidence: 'edited' as const })) } } : {}),
+    ...(room.fixtures ? { fixtures: room.fixtures.map(f => ({ ...f, offset: f.offset * s, sill: f.sill * s, width: f.width * s, height: f.height * s, depth: f.depth===undefined ? undefined : f.depth*s, tolerance: undefined, review:true, evidence: 'edited' as const })) } : {}),
     objects: room.objects.map(o => ({ ...o, position: { x: o.position.x * s, y: o.position.y * s, z: o.position.z * s }, size: { x: o.size.x * s, y: o.size.y * s, z: o.size.z * s }, evidence: 'edited' })),
     warnings: [...new Set([...room.warnings, 'Global scale calibrated from one reference. Local distortion still needs review.'])],
   });
