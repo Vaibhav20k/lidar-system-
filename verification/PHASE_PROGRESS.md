@@ -57,3 +57,9 @@ Validation: 56 Python tests pass, including separate beams, ceiling exclusion an
 Structural candidates now run on the same corrected observations and floor datum as geometry QA, retain capture identity and survive server result parsing. Jobs persist across restart (interrupted work is marked failed, never silently successful); stages have time limits. Raw uploads are staged and validated before placement, cannot overwrite retained captures and use bounded traversal-safe extraction. A delayed processing result cannot overwrite a changed/deleted saved room.
 
 Validation: 58 Python tests, 35 TypeScript/API tests and production build pass. Raw archive traversal/no-overwrite, job restart and capture identity are tested. Reprocessing retained bundles uses the process endpoint; durable automatic job resumption and native device end-to-end processing remain pending.
+
+## Phase 10 — canonical rendering, review and export
+
+Polygon extrusions (including concave profiles), circular columns and varying polygon sections derive their 3D surfaces from canonical geometry. Supported and inferred faces have distinct opacity. Candidates appear in the floor plan and inspector, can be focused, edited, kept or rejected, and retain evidence after rejection. Confirmation never sets absolute accuracy. GLB carries structural geometry and provenance in node extras; JSON/SVG use the same model.
+
+Validation: 38 TypeScript/API tests, production build and all three Chrome end-to-end tests pass. Tests check concave cap area, rotation/radius, rejection visibility, persistent review and actual GLB geometry metadata. Full profile-vertex editing, wall-elevation overlays and inferred-face measurement snapping remain pending.

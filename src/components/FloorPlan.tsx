@@ -1,4 +1,5 @@
 import { bounds, columnName, columnsOf, fixtureLabel, wallInside, wallLength, type Room } from '../domain/room';
+import {structuralRings} from '../scene/structures';
 export default function FloorPlan({ room, selected = '', onSelect }: { room: Room; selected?: string; onSelect?: (id: string) => void }) {
   const b = bounds(room), columns = columnsOf(room), margin = 0.9, width = b.width + margin * 2, height = b.depth + margin * 2;
   return <svg className="floorplan" viewBox={`${b.minX - margin} ${b.minZ - margin} ${width} ${height}`} role="img" aria-label="Measured room floorplan">
@@ -29,6 +30,10 @@ export default function FloorPlan({ room, selected = '', onSelect }: { room: Roo
     {(room.ceiling?.items ?? []).map(i => <g key={i.id} className={onSelect ? 'plan-wall' : ''} onClick={() => onSelect?.(i.id)} transform={`translate(${i.x},${i.z}) rotate(${i.rotation * 180 / Math.PI})`}><title>{`${fixtureLabel(i.kind)} on the ceiling at ${i.height.toFixed(2)} m`}</title>
       {i.kind === 'light' && Math.max(i.width, i.depth) < 0.3 ? <><circle r={Math.max(0.07, i.width / 2)} fill="#ffe9a8" stroke={selected === i.id ? '#648246' : '#b8891f'} strokeWidth=".02" /><path d="M -.05 -.05 L .05 .05 M -.05 .05 L .05 -.05" stroke="#b8891f" strokeWidth=".015" /></>
         : <rect x={-Math.max(0.08, i.width) / 2} y={-Math.max(0.08, i.depth) / 2} width={Math.max(0.08, i.width)} height={Math.max(0.08, i.depth)} rx=".01" fill={i.kind === 'hole' ? '#26272b' : i.kind === 'light' ? '#ffe9a8' : '#9a9d98'} stroke={selected === i.id ? '#648246' : '#6b6f68'} strokeWidth=".02" />}</g>)}
+    {(room.structures??[]).filter(e=>e.review!=='rejected').map(e=><g key={e.id} role={onSelect?'button':undefined} tabIndex={onSelect?0:undefined} aria-label={`Select ${e.kind}, ${e.review}`} onClick={()=>onSelect?.(e.id)} onKeyDown={event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();onSelect?.(e.id);}}}>
+      <title>{`${e.kind}: ${e.review}; inferred faces: ${e.coverage.inferredFaces.join(', ')}. Accuracy unverified.`}</title>
+      {structuralRings(e).map((ring,i)=><polygon key={i} points={ring.map(p=>`${p.x},${p.z}`).join(' ')} fill="#c58b2d" fillOpacity=".12" stroke={selected===e.id?'#648246':'#9a6d25'} strokeWidth=".02" strokeDasharray={e.review==='candidate'?'.06 .04':undefined}/>)}
+    </g>)}
     {room.floor.map((p, i) => <g key={i}><circle cx={p.x} cy={p.z} r=".07" fill="#f6f8ee" stroke="#424c42" strokeWidth=".025" /><text x={p.x + 0.15} y={p.z + 0.22} fontSize=".12" fill="#657060">{i + 1}</text></g>)}
   </svg>;
 }

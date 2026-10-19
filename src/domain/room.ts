@@ -151,6 +151,8 @@ export function addDrawn(room: Room, box: { wallId: string; offset: number; sill
 
 // One line saying what an element is and its key dimension, for tooltips and the selection card.
 export function describeElement(room: Room, id: string): string {
+  const structural=room.structures?.find(e=>e.id===id);
+  if(structural) {const g=structural.geometry,length=g.type==='sections'?g.sections.at(-1)!.at:g.length;return `${structural.kind} · ${length.toFixed(2)} m extrusion · ${structural.review} · accuracy unverified`;}
   const wall = room.walls.findIndex(w => w.id === id);
   const column = columnsOf(room).find(c => c.wallIds.includes(id));
   if (column) return `${columnName(column)} · ${column.height.toFixed(2)} m high · this face ${wallLength(room.walls[wall]).toFixed(2)} m`;
@@ -167,19 +169,21 @@ export function describeElement(room: Room, id: string): string {
 }
 // Everything a person should look at before trusting it: fixtures the detector was unsure of, and furniture the scanner itself rated low.
 export const needsCheck = (room: Room): string[] => [
+  ...(room.structures??[]).filter(e=>e.review==='candidate').map(e=>e.id),
   ...(room.fixtures ?? []).filter(f => f.review).map(f => f.id), ...(room.ceiling?.items ?? []).filter(i => i.review).map(i => i.id),
   ...room.objects.filter(o => o.evidence === 'estimated').map(o => o.id),
 ];
 // A person has looked at it and it is right.
 export function confirmElement(room: Room, id: string): Room {
   return { ...room,
+    structures:room.structures?.map(e=>e.id===id?{...e,review:'confirmed' as const}:e),
     objects: room.objects.map(o => o.id === id ? { ...o, evidence: 'edited' as const } : o),
     fixtures: room.fixtures?.map(f => f.id === id ? { ...f, review: undefined, evidence: 'edited' as const } : f),
     ceiling: room.ceiling && { ...room.ceiling, items: room.ceiling.items?.map(i => i.id === id ? { ...i, review: undefined, evidence: 'edited' as const } : i) },
   };
 }
 export function removeElement(room: Room, id: string): Room {
-  return { ...room, openings: room.openings.filter(o => o.id !== id), objects: room.objects.filter(o => o.id !== id), fixtures: room.fixtures?.filter(f => f.id !== id),
+  return { ...room, structures:room.structures?.map(e=>({...e,review:e.id===id?'rejected' as const:e.review,connections:e.connections.filter(c=>c!==id)})), openings: room.openings.filter(o => o.id !== id), objects: room.objects.filter(o => o.id !== id), fixtures: room.fixtures?.filter(f => f.id !== id),
     ceiling: room.ceiling && { ...room.ceiling, items: room.ceiling.items?.filter(i => i.id !== id) } };
 }
 export const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.z - b.z);

@@ -164,6 +164,12 @@ export default function RoomViewer({ room, furniture, cutaway, ceiling, selected
         target = new THREE.Vector3(item.x, item.height, item.z);
         position = new THREE.Vector3(item.x + 0.5, Math.max(0.5, item.height - 1.9), item.z + 0.5);
       }
+      const structural=room.structures?.find(e=>e.id===selected&&e.review!=='rejected');
+      if(structural) {
+        const g=structural.geometry,length=g.type==='sections'?g.sections.at(-1)!.at:g.length;
+        target=new THREE.Vector3(0,length/2,0).applyQuaternion(new THREE.Quaternion(...structural.rotation)).add(new THREE.Vector3(structural.origin.x,structural.origin.y,structural.origin.z));
+        const reach=Math.max(length,1)*1.5;position=target.clone().add(new THREE.Vector3(reach,.3*reach,reach));
+      }
       if (!target || !position) return;
       mode.current = 'free'; limits('free'); fly(position, target, () => undefined);
     };

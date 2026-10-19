@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import {buildStructure} from './structures';
 import { wallInside, wallLength, type Room } from '../domain/room';
 
 export function buildRoomGroup(room: Room, options: { furniture?: boolean; selected?: string; ceiling?: boolean; markers?: boolean; fixtures?: boolean } = {}) {
@@ -155,7 +156,11 @@ export function buildRoomGroup(room: Room, options: { furniture?: boolean; selec
     } else box([x, y, z], [0, 0, 0], mat, group, id);
     root.add(group);
   }
-  root.userData = { schemaVersion: room.schemaVersion, source: room.source, units: room.units, coordinateSystem: room.coordinateSystem };
+  for(const element of room.structures??[]) {
+    if(element.review==='rejected'||options.ceiling===false&&(element.kind==='beam'||element.kind==='soffit'))continue;
+    root.add(buildStructure(element,options.selected===element.id));
+  }
+  root.userData = { schemaVersion: room.schemaVersion, source: room.source, units: room.units, coordinateSystem: room.coordinateSystem, captureId:room.captureId };
   return root;
 }
 export function disposeGroup(root: THREE.Object3D) {

@@ -39,7 +39,7 @@ export default function App() {
   useEffect(() => { const handler = (e: BeforeUnloadEvent) => { if (dirty) e.preventDefault(); }; window.addEventListener('beforeunload', handler); return () => window.removeEventListener('beforeunload', handler); }, [dirty]);
   const error = (message: string) => setNotice({ text: message, error: true });
   const change = (next: Room) => {
-    const geometryChanged = JSON.stringify([next.floor, next.walls, next.ceiling]) !== JSON.stringify([room.floor, room.walls, room.ceiling]);
+    const geometryChanged = JSON.stringify([next.floor, next.walls, next.ceiling,next.structures]) !== JSON.stringify([room.floor, room.walls, room.ceiling,room.structures]);
     const measurementQuality = geometryChanged && next.measurementQuality ? { ...next.measurementQuality, status: 'needs-rescan' as const, reasons: ['Geometry edited after validation. Recheck dimensions.'], applied: [] } : next.measurementQuality;
     try { const valid = parseRoom({ ...next, measurementQuality, updatedAt: new Date().toISOString() }); setHistory(h => [...h.slice(-29), room]); setRoom(valid); setDirty(true); setNotice(null); return true; }
     catch (e) { error(e instanceof Error ? (e.message.startsWith('[') ? 'Please check your values. Some dimensions are outside the supported range.' : e.message) : 'Invalid room.'); return false; }
