@@ -5,6 +5,7 @@ three independent plane normals must constrain each edge, and entire spatial
 patches are held out. Failed registration leaves raw points untouched.
 """
 import numpy as np
+from pose_graph import optimize
 
 
 def solve_edge(normals, deltas, patch_ids):
@@ -117,6 +118,28 @@ def register(points, normals, frames, walls, floor_y):
     if len(reached) != len(segments):
         result['reason'] = 'not all segments have observable rigid overlap; correction withheld'
         return points, normals, result
+    if len(good)>len(segments)-1:
+        try:
+            transforms,result['optimization']=optimize(transforms,good)
+        except ValueError as error:
+            result['reason']=str(error)+'; correction withheld'
+            return points,normals,result
+    # Recheck held-out patch observations after the global compromise, not only
+    # the pairwise fits. No held-out patches enter the optimizer.
+    for edge in good:
+        a,b=edge['from'],edge['to']
+        before,after=[],[]
+        for pid,(n,obs) in enumerate(patches):
+            if pid%3 or a not in obs or b not in obs: continue
+            ta,tb=transforms[a],transforms[b]
+            pa=ta[:3,:3]@obs[a]+ta[:3,3]
+            pb=tb[:3,:3]@obs[b]+tb[:3,3]
+            before.append(abs((obs[b]-obs[a])@n))
+            after.append(abs((pb-pa)@(ta[:3,:3]@n)))
+        baseline=float(np.percentile(before,90));error=float(np.percentile(after,90))
+        if error>.01 or (baseline>.01 and error>.5*baseline):
+            result['reason']='global held-out surfaces disagree; correction withheld'
+            return points,normals,result
     # Test closure as displacement at the room's bounding corners, so rotation
     # cannot pass just because translations happen to agree at the origin.
     low, high = np.percentile(points, [1, 99], axis=0)

@@ -27,3 +27,9 @@ Validation: 42 Python tests pass, including redundant-view, reserved-revisit and
 Depth, ceiling and cloud consumers share pixel-center unprojection with independent horizontal/vertical intrinsic scaling. Camera poses must be rigid and source-frame indices survive missing depth records. Normals across large depth discontinuities and low-confidence samples are excluded from measurement observations. Original depth is retained; no learned sensor correction is applied.
 
 Validation: 46 Python tests pass, including nonuniform-resize reprojection, rigid-pose rejection, missing-frame identity and confidence exclusion. Device calibration, range/incidence bias fitting and physical accuracy remain pending data from the other system.
+
+## Phase 5 — global rigid alignment
+
+Added an anchored, robust rigid pose graph for redundant validated segment overlaps. Original observations are transformed only after global held-out surface checks, room-corner loop closure and bounded-displacement checks pass. Disconnected/underconstrained scans retain original poses. No scale or surveyed dimension enters optimization.
+
+Validation: 48 Python tests pass, including global loop compromise, fixed anchor and disconnected graph rejection. This is segment-level depth alignment; photometric bundle adjustment, device trajectory tests and real-loop qualification remain pending.
