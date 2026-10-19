@@ -22,15 +22,15 @@ export function createApp(database: string, token = '', scanDirectory?: string) 
     next();
   });
   app.use(express.json({ limit: '5mb' }));
-  app.get('/api/health', (_req, res) => res.json({ status: 'ok', schemaVersion: 1 }));
+  app.get('/api/health', (_req, res) => res.json({ status: 'ok', schemaVersion: 2 }));
   app.get('/api/rooms', (_req, res) => {
     const rows = db.prepare('SELECT body, revision FROM rooms ORDER BY updated_at DESC LIMIT 500').all();
-    res.json({ rooms: rows.map(r => ({ room: JSON.parse(String(r.body)), revision: r.revision })) });
+    res.json({ rooms: rows.map(r => ({ room: parseRoom(JSON.parse(String(r.body))), revision: r.revision })) });
   });
   app.get('/api/rooms/:id', (req, res) => {
     const row = db.prepare('SELECT body, revision FROM rooms WHERE id = ?').get(req.params.id);
     if (!row) { res.status(404).json({ error: 'Room not found.' }); return; }
-    res.json({ room: JSON.parse(String(row.body)), revision: row.revision });
+    res.json({ room: parseRoom(JSON.parse(String(row.body))), revision: row.revision });
   });
   app.put('/api/rooms/:id', (req, res) => {
     let room;

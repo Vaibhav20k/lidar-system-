@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { migrateRoom } from './migrations';
+import { structuralElementSchema, scaleStructure } from './structure';
 
 const number = z.number().finite();
 const id = z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/);
@@ -48,7 +50,8 @@ export const objectSchema = z.object({
   attributes: z.record(z.string().max(40), z.string().max(40)).optional(),
 });
 export const roomSchema = z.object({
-  schemaVersion: z.literal(1), id, name: z.string().trim().min(1).max(100),
+  schemaVersion: z.literal(2), id, name: z.string().trim().min(1).max(100),
+  captureId: id.optional(), structures: z.array(structuralElementSchema).max(256).optional(),
   createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
   units: z.literal('meters'), coordinateSystem: z.literal('right-handed-y-up'),
   source: z.enum(['manual', 'roomplan', 'arcore-depth', 'arcore-guided', 'sample']),
@@ -251,9 +254,10 @@ export function polygonErrors(points: Point[]): string[] {
   return [];
 }
 export function parseRoom(value: unknown): Room {
-  const room = roomSchema.parse(value);
-  const allIds = [...room.walls, ...room.openings, ...room.objects, ...(room.fixtures ?? []), ...(room.ceiling?.items ?? [])].map(v => v.id);
+  const room = roomSchema.parse(migrateRoom(value));
+  const allIds = [...room.walls, ...room.openings, ...room.objects, ...(room.fixtures ?? []), ...(room.ceiling?.items ?? []), ...(room.structures ?? [])].map(v => v.id);
   if (new Set(allIds).size !== allIds.length) throw new Error('Room element IDs must be unique.');
+  for (const element of room.structures ?? []) if (element.connections.some(id => id===element.id || !allIds.includes(id))) throw new Error('Structural connection refers to a missing or identical element.');
   if (room.floor.length) {
     const errors = polygonErrors(room.floor);
     if (errors.length) throw new Error(errors[0]);
@@ -317,6 +321,7 @@ export function calibrateRoom(room: Room, measuredLength: number, wallId: string
   const p = (v: Point) => ({ x: v.x * s, z: v.z * s });
   return parseRoom({ ...room, updatedAt: new Date().toISOString(),
     floor: room.floor.map(p),
+    structures: room.structures?.map(element => scaleStructure(element, s)),
     walls: room.walls.map(w => ({ ...w, start: p(w.start), end: p(w.end), height: w.height * s, baseY: w.baseY * s, thickness: w.thickness * s, evidence: 'edited' })),
     openings: room.openings.map(o => ({ ...o, offset: o.offset * s, width: o.width * s, height: o.height * s, sill: o.sill * s, evidence: 'edited' })),
     ...(room.ceiling ? { ceiling: { ...room.ceiling, height: room.ceiling.height * s, regions: room.ceiling.regions.map(d => ({ ...d, height: d.height * s, points: d.points.map(p), holes: d.holes?.map(h => h.map(p)), evidence: 'edited' as const })),
