@@ -43,8 +43,8 @@ def main():
     dw, dh = manifest['depthSize']
     u, v = np.meshgrid(np.arange(dw) + 0.5, np.arange(dh) + 0.5)
     sums: dict = {}
-    keys_all, pos_all, col_all, down_all = [], [], [], []
-    for line in (raw / 'frames.jsonl').read_text().splitlines():
+    keys_all, pos_all, col_all, down_all, frame_all = [], [], [], [], []
+    for frame_id,line in enumerate((raw / 'frames.jsonl').read_text().splitlines()):
         if not line.strip():
             continue
         f = json.loads(line)
@@ -71,17 +71,20 @@ def main():
         inside = np.all((world >= low) & (world <= high), axis=1)
         world, colour, facing_down = world[inside], colour[inside], facing_down[inside]
         cells = np.floor(world / voxel).astype(np.int64)
-        keys_all.append((cells[:, 0] * 73856093) ^ (cells[:, 1] * 19349663) ^ (cells[:, 2] * 83492791))
+        # Exact voxel coordinates avoid hash collisions between unrelated faces.
+        keys_all.append(cells)
+        frame_all.append(np.full(len(cells),frame_id))
         pos_all.append(world); col_all.append(colour.astype(np.float64)); down_all.append(facing_down)
     if not keys_all:
         raise SystemExit('No usable depth frames in this bundle.')
     keys, pos, col, down = np.concatenate(keys_all), np.concatenate(pos_all), np.concatenate(col_all), np.concatenate(down_all)
     # Average everything that landed in the same voxel; a cell seen by only one reading is likely a speck.
-    unique, index, counts = np.unique(keys, return_inverse=True, return_counts=True)
+    unique, index, counts = np.unique(keys, axis=0, return_inverse=True, return_counts=True)
     position = np.zeros((len(unique), 3)); colour = np.zeros((len(unique), 3)); down_votes = np.zeros(len(unique))
     np.add.at(position, index, pos); np.add.at(colour, index, col); np.add.at(down_votes, index, down)
     position /= counts[:, None]; colour /= counts[:, None]; down_share = down_votes / counts
-    solid = counts >= 2
+    support=np.unique(np.column_stack([index,np.concatenate(frame_all)]),axis=0)
+    solid = np.bincount(support[:,0],minlength=len(unique)) >= 2
     position, colour, down_share = position[solid], colour[solid], down_share[solid]
 
     groups = np.zeros(len(position), np.uint8)

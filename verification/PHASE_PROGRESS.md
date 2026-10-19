@@ -33,3 +33,9 @@ Validation: 46 Python tests pass, including nonuniform-resize reprojection, rigi
 Added an anchored, robust rigid pose graph for redundant validated segment overlaps. Original observations are transformed only after global held-out surface checks, room-corner loop closure and bounded-displacement checks pass. Disconnected/underconstrained scans retain original poses. No scale or surveyed dimension enters optimization.
 
 Validation: 48 Python tests pass, including global loop compromise, fixed anchor and disconnected graph rejection. This is segment-level depth alignment; photometric bundle adjustment, device trajectory tests and real-loop qualification remain pending.
+
+## Phase 6 — evidence-preserving surface foundation
+
+Added oriented surfels with equal contribution per source frame, retained frame membership, per-axis inter-frame variance and separate normal bins. Opposing faces are not averaged. No gaps are filled; final dimensions must use source points. Display cloud voxel grouping now uses exact coordinates and requires support from distinct frames instead of duplicate pixels.
+
+Validation: 51 Python tests pass. Full adaptive TSDF/mesh reconstruction and topology-qualified plane extraction remain deferred; this foundation supports candidate segmentation without implying complete observed surfaces.
